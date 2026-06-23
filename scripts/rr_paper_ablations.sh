@@ -182,6 +182,7 @@ albert_shared() {
 
 group_core() {
   # Core uses full-rank embeddings; embedding-factorization sweeps live in components.
+  rr tiny8x_h256_l2_c2x3_ef4 256 4 2 2 3 4 4.0
   rr tiny8x_h256_l2_c2x3_ef1 256 4 2 2 3 1 4.0
 
   # Same dimensions as tiny8x, but no nested RR state/cycles.

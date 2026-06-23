@@ -311,6 +311,7 @@ albert_shared() {
 }
 
 group_core() {
+  rr tiny8x_h256_l2_c2x3_ef4 256 4 2 2 3 4 4.0
   rr tiny8x_h256_l2_c2x3_ef1 256 4 2 2 3 1 4.0
   albert_shared h256_eff16_e256 256 4 16 1024 256
   hfbert h256_l2 256 4 2 1024
