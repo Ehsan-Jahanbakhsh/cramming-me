@@ -1,97 +1,77 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# One-pass pretraining runs for Recursive Refiner paper ablations.
+# Epoch-based paper ablations for Recursive Refiner.
 #
-# This script is for token/dataset-pass matching, not wall-clock-budget matching.
-# It computes train.steps from the readymade Pile row count:
+# This mirrors rr_paper_ablations.sh, but pretraining duration is derived from
+# dataset epochs instead of wall-clock budget:
 #
-#   train.steps = floor(PILE_ROWS / (impl.microbatch_size * NPROC_PER_NODE))
+#   train.steps = floor(PILE_ROWS / (impl.microbatch_size * NPROC_PER_NODE)) * TRAIN_EPOCHS
 #
-# and switches to a step-based scheduler so the large budget is only a safety
-# ceiling, not part of the learning-rate schedule.
+# The budget remains only as a safety ceiling for pretrain.py.
 #
 # Usage:
-#   bash scripts/rr_paper_one_epoch_pretrain.sh print all
+#   bash scripts/rr_paper_one_epoch_pretrain.sh print-pretrain core
 #   bash scripts/rr_paper_one_epoch_pretrain.sh pretrain core
-#   bash scripts/rr_paper_one_epoch_pretrain.sh dryrun core
+#   bash scripts/rr_paper_one_epoch_pretrain.sh print-eval core
+#   bash scripts/rr_paper_one_epoch_pretrain.sh eval core
+#   TRAIN_EPOCHS=3 bash scripts/rr_paper_one_epoch_pretrain.sh print-pretrain all
 #
-# Useful overrides:
-#   GPU_PROFILE=h200 bash scripts/rr_paper_one_epoch_pretrain.sh pretrain all
-#   NPROC_PER_NODE=8 GPU_PROFILE=h200 bash scripts/rr_paper_one_epoch_pretrain.sh pretrain sizes
-#   PILE_ROWS=85000000 TRAIN_MBS=256 bash scripts/rr_paper_one_epoch_pretrain.sh print core
+# Groups:
+#   core        - smallest defensible table around the successful tiny8x model
+#   baselines   - BERT/CrammedBERT/ALBERT comparisons at matched dimensions/depths
+#   components  - RR component ablations: embedding rank, cycles, depth, FFN, norm
+#   sizes       - RR width scaling sweep
+#   all         - core + baselines + components + sizes
 
-ACTION="${1:-print}"
-GROUP="${2:-all}"
+ACTION="${1:-print-pretrain}"
+GROUP="${2:-core}"
 
-GPU_PROFILE="${GPU_PROFILE:-5090}" # 5090, h200, custom
-PREFIX="${PREFIX:-rr_1ep}"
+PREFIX="${PREFIX:-rr_paper_${TRAIN_EPOCHS:-${EPOCHS:-1}}ep}"
 SEED="${SEED:-1975620753}"
-
 PILE_ROWS="${PILE_ROWS:-85000000}"
-SEQ_LENGTH="${SEQ_LENGTH:-128}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
-
-# Keep this high so steps, not budget, stops the run.
+TRAIN_EPOCHS="${TRAIN_EPOCHS:-${EPOCHS:-1}}"
 SAFETY_BUDGET="${SAFETY_BUDGET:-9999}"
-
-# Step-based scheduler: budget-* schedulers would still depend on wall-clock.
-SCHEDULER="${SCHEDULER:-one-cycle}"
-BATCH_SIZE_RAMP="${BATCH_SIZE_RAMP:-0}"
-WARMUP_STEPS="${WARMUP_STEPS:-0}"
-COOLDOWN_STEPS="${COOLDOWN_STEPS:-0}"
-
+NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
+TRAIN_MBS="${TRAIN_MBS:-256}"
+TRAIN_BATCH="${TRAIN_BATCH:-2048}"
+TRAIN_SCHEDULER="${TRAIN_SCHEDULER:-one-cycle}"
+TRAIN_BATCH_RAMP="${TRAIN_BATCH_RAMP:-0}"
+TRAIN_WARMUP_STEPS="${TRAIN_WARMUP_STEPS:-0}"
+TRAIN_COOLDOWN_STEPS="${TRAIN_COOLDOWN_STEPS:-0}"
+EVAL_MBS="${EVAL_MBS:-16}"
+EVAL_CFG="${EVAL_CFG:-GLUE}"
+EVAL_EPOCHS="${EVAL_EPOCHS:-4}"
+EVAL_BATCH="${EVAL_BATCH:-16}"
+EVAL_LR="${EVAL_LR:-8e-5}"
 COMPILE_TORCH="${COMPILE_TORCH:-True}"
-MIXED_PRECISION_TARGET_DTYPE="${MIXED_PRECISION_TARGET_DTYPE:-float16}"
-TRAIN_BATCH="${TRAIN_BATCH:-}"
-TRAIN_MBS="${TRAIN_MBS:-}"
 
+PHASE=""
 EXECUTE="false"
 DRYRUN="False"
 
 case "$ACTION" in
-  print) ;;
-  pretrain) EXECUTE="true" ;;
-  dryrun) EXECUTE="true"; DRYRUN="True" ;;
+  print-pretrain) PHASE="pretrain" ;;
+  print-eval) PHASE="eval" ;;
+  pretrain) PHASE="pretrain"; EXECUTE="true" ;;
+  eval) PHASE="eval"; EXECUTE="true" ;;
+  dryrun-pretrain) PHASE="pretrain"; EXECUTE="true"; DRYRUN="True" ;;
+  dryrun-eval) PHASE="eval"; EXECUTE="true"; DRYRUN="True" ;;
   *)
     echo "Unknown action: $ACTION" >&2
     exit 2
     ;;
 esac
 
-case "$GPU_PROFILE" in
-  5090)
-    DEFAULT_BATCH="${DEFAULT_BATCH:-2048}"
-    DEFAULT_MBS="${DEFAULT_MBS:-256}"
-    H128_MBS="${H128_MBS:-256}"
-    H256_MBS="${H256_MBS:-256}"
-    H512_MBS="${H512_MBS:-128}"
-    H768_MBS="${H768_MBS:-128}"
-    H1024_MBS="${H1024_MBS:-64}"
-    ;;
-  h200)
-    DEFAULT_BATCH="${DEFAULT_BATCH:-4096}"
-    DEFAULT_MBS="${DEFAULT_MBS:-1024}"
-    H128_MBS="${H128_MBS:-2048}"
-    H256_MBS="${H256_MBS:-1536}"
-    H512_MBS="${H512_MBS:-768}"
-    H768_MBS="${H768_MBS:-512}"
-    H1024_MBS="${H1024_MBS:-256}"
-    ;;
-  custom)
-    DEFAULT_BATCH="${DEFAULT_BATCH:-2048}"
-    DEFAULT_MBS="${DEFAULT_MBS:-256}"
-    H128_MBS="${H128_MBS:-$DEFAULT_MBS}"
-    H256_MBS="${H256_MBS:-$DEFAULT_MBS}"
-    H512_MBS="${H512_MBS:-$DEFAULT_MBS}"
-    H768_MBS="${H768_MBS:-$DEFAULT_MBS}"
-    H1024_MBS="${H1024_MBS:-$DEFAULT_MBS}"
-    ;;
-  *)
-    echo "Unknown GPU_PROFILE: $GPU_PROFILE" >&2
-    exit 2
-    ;;
-esac
+if ! [[ "$TRAIN_EPOCHS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "TRAIN_EPOCHS must be a positive integer, got: $TRAIN_EPOCHS" >&2
+  exit 2
+fi
+
+if ! [[ "$NPROC_PER_NODE" =~ ^[1-9][0-9]*$ ]]; then
+  echo "NPROC_PER_NODE must be a positive integer, got: $NPROC_PER_NODE" >&2
+  exit 2
+fi
 
 run_cmd() {
   if [[ "$EXECUTE" == "true" ]]; then
@@ -108,79 +88,7 @@ comment() {
   fi
 }
 
-size_class_for_suffix() {
-  local suffix="$1"
-  case "$suffix" in
-    *h128*) echo "h128" ;;
-    *h256*|tiny8x*) echo "h256" ;;
-    *h512*) echo "h512" ;;
-    *h768*) echo "h768" ;;
-    *h1024*) echo "h1024" ;;
-    *) echo "default" ;;
-  esac
-}
-
-mbs_for_size() {
-  local size="$1"
-  if [[ -n "$TRAIN_MBS" ]]; then
-    echo "$TRAIN_MBS"
-    return
-  fi
-  case "$size" in
-    h128) echo "$H128_MBS" ;;
-    h256|default) echo "$H256_MBS" ;;
-    h512) echo "$H512_MBS" ;;
-    h768) echo "$H768_MBS" ;;
-    h1024) echo "$H1024_MBS" ;;
-    *) echo "$DEFAULT_MBS" ;;
-  esac
-}
-
-batch_for_size() {
-  local size="$1"
-  if [[ -n "$TRAIN_BATCH" ]]; then
-    echo "$TRAIN_BATCH"
-    return
-  fi
-  case "$size" in
-    h768|h1024) echo 8192 ;;
-    h512) echo 4096 ;;
-    *) echo "$DEFAULT_BATCH" ;;
-  esac
-}
-
-round_batch_to_effective_mbs() {
-  local batch="$1"
-  local effective_mbs="$2"
-  if (( batch < effective_mbs )); then
-    echo "$effective_mbs"
-  elif (( batch % effective_mbs != 0 )); then
-    echo $(( ((batch + effective_mbs - 1) / effective_mbs) * effective_mbs ))
-  else
-    echo "$batch"
-  fi
-}
-
-steps_for_one_epoch() {
-  local mbs="$1"
-  local nproc="$2"
-  local effective_mbs=$(( mbs * nproc ))
-  local steps=$(( PILE_ROWS / effective_mbs ))
-  if (( steps < 1 )); then
-    echo 1
-  else
-    echo "$steps"
-  fi
-}
-
-token_positions_for_steps() {
-  local steps="$1"
-  local mbs="$2"
-  local nproc="$3"
-  echo $(( steps * mbs * nproc * SEQ_LENGTH ))
-}
-
-base_launcher() {
+launcher() {
   if (( NPROC_PER_NODE > 1 )); then
     echo torchrun --nproc_per_node="$NPROC_PER_NODE" --standalone pretrain.py
   else
@@ -188,33 +96,50 @@ base_launcher() {
   fi
 }
 
+microbatch_from_args() {
+  local mbs="$TRAIN_MBS"
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      impl.microbatch_size=*) mbs="${arg#impl.microbatch_size=}" ;;
+    esac
+  done
+  echo "$mbs"
+}
+
+steps_for_epochs() {
+  local mbs="$1"
+  local effective_mbs=$(( mbs * NPROC_PER_NODE ))
+  local steps_per_epoch=$(( PILE_ROWS / effective_mbs ))
+  if (( steps_per_epoch < 1 )); then
+    steps_per_epoch=1
+  fi
+  echo $(( steps_per_epoch * TRAIN_EPOCHS ))
+}
+
 pretrain_cmd() {
   local name="$1"
-  local suffix="$2"
-  shift 2
-  local size
+  shift
   local mbs
-  local batch
-  local effective_mbs
   local steps
-  local token_positions
+  local arg
+  local extra_args=()
 
-  size="$(size_class_for_suffix "$suffix")"
-  mbs="$(mbs_for_size "$size")"
-  batch="$(batch_for_size "$size")"
-  effective_mbs=$(( mbs * NPROC_PER_NODE ))
-  batch="$(round_batch_to_effective_mbs "$batch" "$effective_mbs")"
-  steps="$(steps_for_one_epoch "$mbs" "$NPROC_PER_NODE")"
-  token_positions="$(token_positions_for_steps "$steps" "$mbs" "$NPROC_PER_NODE")"
+  mbs="$(microbatch_from_args "$@")"
+  steps="$(steps_for_epochs "$mbs")"
+  for arg in "$@"; do
+    case "$arg" in
+      impl.microbatch_size=*) ;;
+      *) extra_args+=("$arg") ;;
+    esac
+  done
 
-  comment "name=${name} profile=${GPU_PROFILE} size=${size} rows=${PILE_ROWS} seq=${SEQ_LENGTH} nproc=${NPROC_PER_NODE}"
-  comment "microbatch_per_gpu=${mbs} effective_microbatch=${effective_mbs} global_batch=${batch} steps=${steps} token_positions=${token_positions}"
-  comment "scheduler=${SCHEDULER} batch_size_ramp=${BATCH_SIZE_RAMP} safety_budget=${SAFETY_BUDGET}h"
+  comment "name=${name} rows=${PILE_ROWS} epochs=${TRAIN_EPOCHS} nproc=${NPROC_PER_NODE} microbatch_per_gpu=${mbs} steps=${steps}"
 
   # shellcheck disable=SC2207
-  local launcher=( $(base_launcher) )
+  local cmd=( $(launcher) )
   run_cmd \
-    "${launcher[@]}" \
+    "${cmd[@]}" \
     name="$name" \
     seed="$SEED" \
     data=pile-readymade \
@@ -222,16 +147,45 @@ pretrain_cmd() {
     budget="$SAFETY_BUDGET" \
     dryrun="$DRYRUN" \
     train.steps="$steps" \
-    train.scheduler="$SCHEDULER" \
-    train.batch_size="$batch" \
-    train.batch_size_ramp="$BATCH_SIZE_RAMP" \
-    train.warmup_steps="$WARMUP_STEPS" \
-    train.cooldown_steps="$COOLDOWN_STEPS" \
+    train.scheduler="$TRAIN_SCHEDULER" \
+    train.batch_size="$TRAIN_BATCH" \
+    train.batch_size_ramp="$TRAIN_BATCH_RAMP" \
+    train.warmup_steps="$TRAIN_WARMUP_STEPS" \
+    train.cooldown_steps="$TRAIN_COOLDOWN_STEPS" \
     impl.microbatch_size="$mbs" \
     impl.compile_torch="$COMPILE_TORCH" \
-    impl.mixed_precision_target_dtype="$MIXED_PRECISION_TARGET_DTYPE" \
-    "wandb.tags=[rr-paper,one-epoch,pretrain]" \
+    "wandb.tags=[rr-paper,epoch-pretrain]" \
+    "${extra_args[@]}"
+}
+
+eval_cmd() {
+  local name="$1"
+  shift
+  run_cmd \
+    python eval.py \
+    name="$name" \
+    seed="$SEED" \
+    eval="$EVAL_CFG" \
+    eval.checkpoint=latest \
+    eval.epochs="$EVAL_EPOCHS" \
+    eval.batch_size="$EVAL_BATCH" \
+    eval.optim.lr="$EVAL_LR" \
+    dryrun="$DRYRUN" \
+    impl.microbatch_size="$EVAL_MBS" \
+    impl.shuffle_in_dataloader=True \
+    impl.compile_torch=False \
+    "wandb.tags=[rr-paper,eval]" \
     "$@"
+}
+
+emit() {
+  local name="$1"
+  shift
+  if [[ "$PHASE" == "pretrain" ]]; then
+    pretrain_cmd "$name" "$@"
+  else
+    eval_cmd "$name"
+  fi
 }
 
 rr() {
@@ -244,7 +198,7 @@ rr() {
   local embed_factor="$7"
   local expansion="$8"
   shift 8
-  pretrain_cmd "${PREFIX}_rr_${suffix}" "$suffix" \
+  emit "${PREFIX}_rr_${suffix}" \
     arch=recursive-refiner-tiny \
     arch.hidden_size="$hidden" \
     arch.num_attention_heads="$heads" \
@@ -263,7 +217,7 @@ hfbert() {
   local layers="$4"
   local intermediate="$5"
   shift 5
-  pretrain_cmd "${PREFIX}_hfbert_${suffix}" "$suffix" \
+  emit "${PREFIX}_hfbert_${suffix}" \
     arch=hf-bert-tiny \
     arch.hidden_size="$hidden" \
     arch.num_attention_heads="$heads" \
@@ -279,7 +233,7 @@ crammed() {
   local layers="$4"
   local intermediate="$5"
   shift 5
-  pretrain_cmd "${PREFIX}_crammed_${suffix}" "$suffix" \
+  emit "${PREFIX}_crammed_${suffix}" \
     arch=crammed-bert \
     arch.hidden_size="$hidden" \
     arch.num_transformer_layers="$layers" \
@@ -298,7 +252,7 @@ albert_shared() {
   local intermediate="$5"
   local embedding="$6"
   shift 6
-  pretrain_cmd "${PREFIX}_albert_${suffix}" "$suffix" \
+  emit "${PREFIX}_albert_${suffix}" \
     arch=hf-albert-shared \
     arch.hidden_size="$hidden" \
     arch.embedding_size="$embedding" \
@@ -311,34 +265,52 @@ albert_shared() {
 }
 
 group_core() {
+  # Core uses full-rank embeddings; embedding-factorization sweeps live in components.
   rr tiny8x_h256_l2_c2x3_ef4 256 4 2 2 3 4 4.0
   rr tiny8x_h256_l2_c2x3_ef1 256 4 2 2 3 1 4.0
+
+  # Same dimensions as tiny8x, but no nested RR state/cycles.
   albert_shared h256_eff16_e256 256 4 16 1024 256
+
+  # Same hidden width and physical depth.
   hfbert h256_l2 256 4 2 1024
   crammed h256_l2 256 4 2 1024
+
+  # Smaller full-embedding BERT baseline.
   hfbert h128_l2_param_match 128 2 2 512
 }
 
 group_baselines() {
   group_core
-  hfbert h256_l16_effective_depth 256 4 16 1024
-  crammed h256_l16_effective_depth 256 4 16 1024
+
+  # Match RR's effective Transformer-block applications: 2 layers * 2 hi * (3 lo + 1 hi) = 16.
+  hfbert h256_l16_effective_depth 256 4 16 1024 impl.microbatch_size=128
+  crammed h256_l16_effective_depth 256 4 16 1024 impl.microbatch_size=128
+
+  # Shared-weight controls at the same effective depth with ALBERT factorized embeddings.
   albert_shared h256_eff8_e64 256 4 8 1024 64
 }
 
 group_components() {
+  # Low-rank/tied embedding ablation.
   rr h256_l2_c2x3_ef1 256 4 2 2 3 1 4.0
   rr h256_l2_c2x3_ef2 256 4 2 2 3 2 4.0
   rr h256_l2_c2x3_ef4 256 4 2 2 3 4 4.0
   rr h256_l2_c2x3_ef8 256 4 2 2 3 8 4.0
+
+  # Recurrence schedule at roughly fixed physical parameters.
   rr h256_l2_c1x1_ef4 256 4 2 1 1 4 4.0
   rr h256_l2_c1x3_ef4 256 4 2 1 3 4 4.0
   rr h256_l2_c2x1_ef4 256 4 2 2 1 4 4.0
   rr h256_l2_c4x1_ef4 256 4 2 4 1 4 4.0
   rr h256_l2_c1x7_ef4 256 4 2 1 7 4 4.0
   rr h256_l2_c3x2_ef4 256 4 2 3 2 4 4.0
+
+  # Physical block count while preserving the successful 2x3 schedule.
   rr h256_l1_c2x3_ef4 256 4 1 2 3 4 4.0
-  rr h256_l4_c2x3_ef4 256 4 4 2 3 4 4.0
+  rr h256_l4_c2x3_ef4 256 4 4 2 3 4 4.0 impl.microbatch_size=128
+
+  # FFN and normalization choices.
   rr h256_l2_c2x3_ef4_exp2 256 4 2 2 3 4 2.0
   rr h256_l2_c2x3_ef4_exp6 256 4 2 2 3 4 6.0
   rr h256_l2_c2x3_ef4_postnorm 256 4 2 2 3 4 4.0 arch.pre_norm=False
@@ -347,25 +319,9 @@ group_components() {
 group_sizes() {
   rr h128_l2_c2x3_ef4 128 2 2 2 3 4 4.0
   rr h256_l2_c2x3_ef4 256 4 2 2 3 4 4.0
-  rr h512_l2_c2x3_ef4 512 8 2 2 3 4 4.0
-  rr h768_l2_c2x3_ef4 768 12 2 2 3 4 4.0
-  rr h1024_l2_c2x3_ef4 1024 16 2 2 3 4 4.0
-}
-
-group_sizes_without_h256() {
-  rr h128_l2_c2x3_ef4 128 2 2 2 3 4 4.0
-  rr h512_l2_c2x3_ef4 512 8 2 2 3 4 4.0
-  rr h768_l2_c2x3_ef4 768 12 2 2 3 4 4.0
-  rr h1024_l2_c2x3_ef4 1024 16 2 2 3 4 4.0
-}
-
-group_utilization() {
-  TRAIN_BATCH=2048; TRAIN_MBS=256; rr h256_util_b2048_m256 256 4 2 2 3 4 4.0
-  TRAIN_BATCH=4096; TRAIN_MBS=512; rr h256_util_b4096_m512 256 4 2 2 3 4 4.0
-  TRAIN_BATCH=4096; TRAIN_MBS=1024; rr h256_util_b4096_m1024 256 4 2 2 3 4 4.0
-  TRAIN_BATCH=8192; TRAIN_MBS=1024; rr h256_util_b8192_m1024 256 4 2 2 3 4 4.0
-  TRAIN_BATCH=8192; TRAIN_MBS=1536; rr h256_util_b8192_m1536 256 4 2 2 3 4 4.0
-  TRAIN_BATCH=""; TRAIN_MBS=""
+  rr h512_l2_c2x3_ef4 512 8 2 2 3 4 4.0 impl.microbatch_size=128
+  rr h768_l2_c2x3_ef4 768 12 2 2 3 4 4.0 impl.microbatch_size=128
+  rr h1024_l2_c2x3_ef4 1024 16 2 2 3 4 4.0 impl.microbatch_size=64
 }
 
 case "$GROUP" in
@@ -373,12 +329,10 @@ case "$GROUP" in
   baselines) group_baselines ;;
   components) group_components ;;
   sizes) group_sizes ;;
-  utilization) group_utilization ;;
   all)
     group_baselines
     group_components
-    group_sizes_without_h256
-    group_utilization
+    group_sizes
     ;;
   *)
     echo "Unknown group: $GROUP" >&2
