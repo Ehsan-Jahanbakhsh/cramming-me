@@ -22,7 +22,21 @@ import logging
 
 import transformers
 from safetensors.torch import load_file, save_file
-from transformers.utils.generic import working_or_temp_dir
+
+try:
+    from transformers.utils.generic import working_or_temp_dir
+except ImportError:
+    import tempfile
+    from contextlib import contextmanager
+
+    @contextmanager
+    def working_or_temp_dir(working_dir, use_temp_dir=False):
+        if use_temp_dir:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                yield tmp_dir
+        else:
+            os.makedirs(working_dir, exist_ok=True)
+            yield working_dir
 
 
 from .utils import group_parameters, prepare_pretraining_dataloader, update_ema, updated_latest_weight_average
