@@ -181,17 +181,17 @@ albert_shared() {
 }
 
 group_core() {
-  # Re-run the successful tiny8x setting under a paper-specific name.
-  rr tiny8x_h256_l2_c2x3_ef4 256 4 2 2 3 4 4.0
+  # Core uses full-rank embeddings; embedding-factorization sweeps live in components.
+  rr tiny8x_h256_l2_c2x3_ef1 256 4 2 2 3 1 4.0
 
   # Same dimensions as tiny8x, but no nested RR state/cycles.
-  albert_shared h256_eff16_e64 256 4 16 1024 64
+  albert_shared h256_eff16_e256 256 4 16 1024 256
 
   # Same hidden width and physical depth.
   hfbert h256_l2 256 4 2 1024
   crammed h256_l2 256 4 2 1024
 
-  # Approximate parameter-matched full-embedding BERT baseline for the 4.22M RR.
+  # Smaller full-embedding BERT baseline.
   hfbert h128_l2_param_match 128 2 2 512
 }
 
@@ -202,8 +202,7 @@ group_baselines() {
   hfbert h256_l16_effective_depth 256 4 16 1024 impl.microbatch_size=128
   crammed h256_l16_effective_depth 256 4 16 1024 impl.microbatch_size=128
 
-  # Shared-weight controls at the same effective depth, with and without ALBERT factorized embeddings.
-  albert_shared h256_eff16_e256 256 4 16 1024 256
+  # Shared-weight controls at the same effective depth with ALBERT factorized embeddings.
   albert_shared h256_eff8_e64 256 4 8 1024 64
 }
 

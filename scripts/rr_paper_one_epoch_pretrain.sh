@@ -311,8 +311,8 @@ albert_shared() {
 }
 
 group_core() {
-  rr tiny8x_h256_l2_c2x3_ef4 256 4 2 2 3 4 4.0
-  albert_shared h256_eff16_e64 256 4 16 1024 64
+  rr tiny8x_h256_l2_c2x3_ef1 256 4 2 2 3 1 4.0
+  albert_shared h256_eff16_e256 256 4 16 1024 256
   hfbert h256_l2 256 4 2 1024
   crammed h256_l2 256 4 2 1024
   hfbert h128_l2_param_match 128 2 2 512
@@ -322,7 +322,6 @@ group_baselines() {
   group_core
   hfbert h256_l16_effective_depth 256 4 16 1024
   crammed h256_l16_effective_depth 256 4 16 1024
-  albert_shared h256_eff16_e256 256 4 16 1024 256
   albert_shared h256_eff8_e64 256 4 8 1024 64
 }
 
