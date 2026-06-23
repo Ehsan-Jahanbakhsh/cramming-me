@@ -508,16 +508,87 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
         return BaseModelOutput(last_hidden_state=z_out, hidden_states=None, attentions=None)
 
 
+class RecursiveRefinerSingleHighModel(RecursiveRefinerModel):
+    """
+    Recursive Refiner variant with a single high-level vector per batch item.
+
+    ``z_hi`` is kept as [B, D] internally, while ``z_lo`` remains token-shaped
+    as [B, T, D]. Token-level outputs are formed by adding the final high vector
+    back to every low-level token state.
+    """
+
+    def init_latents(self, batch_size: int, total_len: int, device: torch.device, dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
+        z_hi = self.hi_init.to(device=device, dtype=dtype).view(1, -1).expand(batch_size, -1).contiguous()
+        z_lo = self.lo_init.to(device=device, dtype=dtype).view(1, 1, -1).expand(batch_size, total_len, -1).contiguous()
+        return z_hi, z_lo
+
+    def _pool_low_state(self, z_lo: torch.Tensor, attention_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        if attention_mask is None:
+            return z_lo.mean(dim=1)
+
+        mask = attention_mask.to(dtype=z_lo.dtype, device=z_lo.device).unsqueeze(-1)
+        denom = mask.sum(dim=1).clamp(min=1.0)
+        return (z_lo * mask).sum(dim=1) / denom
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        **kwargs,
+    ) -> Union[BaseModelOutput, Tuple[torch.Tensor]]:
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if input_ids.dim() != 2:
+            raise ValueError(f"input_ids must be [B, L], got {tuple(input_ids.shape)}")
+        b, l = input_ids.shape
+
+        if attention_mask is not None and attention_mask.shape != (b, l):
+            raise ValueError(f"attention_mask must have shape {(b, l)}, got {tuple(attention_mask.shape)}")
+
+        x = self.embed(input_ids)  # [B, L, D]
+
+        if self.config.prefix_len > 0:
+            prefix = self.prefix.unsqueeze(0).expand(b, -1, -1)  # [B, P, D]
+            x = torch.cat([prefix, x], dim=1)  # [B, P+L, D]
+            if attention_mask is not None:
+                prefix_mask = torch.ones(b, self.config.prefix_len, device=attention_mask.device, dtype=attention_mask.dtype)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)  # [B, P+L]
+
+        total_len = x.shape[1]
+        z_hi, z_lo = self.init_latents(b, total_len=total_len, device=x.device, dtype=x.dtype)
+
+        hi_cycles = int(max(1, self.config.hi_cycles))
+        lo_cycles = int(max(1, self.config.lo_cycles))
+
+        for _ in range(hi_cycles):
+            for _ in range(lo_cycles):
+                z_lo = self.shared(z_lo, inject=(z_hi.unsqueeze(1) + x), attention_mask=attention_mask)
+
+            pooled_lo = self._pool_low_state(z_lo, attention_mask)
+            z_hi = self.shared(z_hi.unsqueeze(1), inject=pooled_lo.unsqueeze(1), attention_mask=None).squeeze(1)
+
+        z_final = z_lo + z_hi.unsqueeze(1)
+        z_out = z_final[:, self.config.prefix_len:]  # [B, L, D] (prefix removed)
+
+        if not return_dict:
+            return (z_out,)
+        return BaseModelOutput(last_hidden_state=z_out, hidden_states=None, attentions=None)
+
+
 class RecursiveRefinerForMaskedLM(RecursiveRefinerPreTrainedModel):
     """
     MLM head (bidirectional attention). Use DataCollatorForLanguageModeling(mlm=True).
     """
+    model_cls = RecursiveRefinerModel
+
     def __init__(self, config: RecursiveRefinerConfig):
         # Ensure MLM uses bidirectional attention
         config.is_causal = False
         config.is_decoder = False
         super().__init__(config)
-        self.recursive_refiner = RecursiveRefinerModel(config)
+        self.recursive_refiner = self.model_cls(config)
         self.post_init()
 
     def get_output_embeddings(self) -> Optional[nn.Module]:
@@ -570,11 +641,13 @@ class RecursiveRefinerForCausalLM(RecursiveRefinerPreTrainedModel):
     Autoregressive (causal) LM head. Use DataCollatorForLanguageModeling(mlm=False).
     The shifting for next-token prediction is done inside forward().
     """
+    model_cls = RecursiveRefinerModel
+
     def __init__(self, config: RecursiveRefinerConfig):
         config.is_causal = True
         config.is_decoder = True
         super().__init__(config)
-        self.recursive_refiner = RecursiveRefinerModel(config)
+        self.recursive_refiner = self.model_cls(config)
         self.post_init()
 
     def get_output_embeddings(self) -> Optional[nn.Module]:
@@ -646,6 +719,7 @@ class RecursiveRefinerForSequenceClassification(RecursiveRefinerPreTrainedModel)
       * ``pooler_type=\"cls\"`` (default): use first token embedding.
       * ``pooler_type=\"mean\"``: masked mean-pooling over sequence length.
     """
+    model_cls = RecursiveRefinerModel
 
     def __init__(self, config: RecursiveRefinerConfig):
         # Classification is typically done with bidirectional attention, but we do
@@ -654,7 +728,7 @@ class RecursiveRefinerForSequenceClassification(RecursiveRefinerPreTrainedModel)
         super().__init__(config)
         self.num_labels = int(getattr(config, "num_labels", 2))
 
-        self.recursive_refiner = RecursiveRefinerModel(config)
+        self.recursive_refiner = self.model_cls(config)
         p = float(getattr(config, "classifier_dropout", 0.1))
         self.dropout = nn.Dropout(p)
         self.classifier = nn.Linear(config.hidden_size, self.num_labels)
@@ -725,3 +799,21 @@ class RecursiveRefinerForSequenceClassification(RecursiveRefinerPreTrainedModel)
             hidden_states=None,
             attentions=None,
         )
+
+
+class RecursiveRefinerSingleHighForMaskedLM(RecursiveRefinerForMaskedLM):
+    """Masked-LM head using the single-vector high-level latent variant."""
+
+    model_cls = RecursiveRefinerSingleHighModel
+
+
+class RecursiveRefinerSingleHighForCausalLM(RecursiveRefinerForCausalLM):
+    """Causal-LM head using the single-vector high-level latent variant."""
+
+    model_cls = RecursiveRefinerSingleHighModel
+
+
+class RecursiveRefinerSingleHighForSequenceClassification(RecursiveRefinerForSequenceClassification):
+    """Sequence classification head using the single-vector high-level latent variant."""
+
+    model_cls = RecursiveRefinerSingleHighModel

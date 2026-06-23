@@ -23,7 +23,13 @@ def construct_model(cfg_arch, vocab_size, downstream_classes=None):
             model = construct_scriptable_funnel(cfg_arch, vocab_size, downstream_classes)
         elif "ScriptableRecurrentLM" in cfg_arch.architectures:
             model = construct_scriptable_recurrent(cfg_arch, vocab_size, downstream_classes)
-        elif "RecursiveRefinerForMaskedLM" in cfg_arch.architectures or "RecursiveRefinerForCausalLM" in cfg_arch.architectures:
+        elif (
+            "RecursiveRefinerForMaskedLM" in cfg_arch.architectures
+            or "RecursiveRefinerForCausalLM" in cfg_arch.architectures
+            or "RecursiveRefinerSingleHighForMaskedLM" in cfg_arch.architectures
+            or "RecursiveRefinerSingleHighForCausalLM" in cfg_arch.architectures
+            or "RecursiveRefinerSingleHighForSequenceClassification" in cfg_arch.architectures
+        ):
             model = construct_recursive_refiner(cfg_arch, vocab_size, downstream_classes)
         elif "SanityCheckLM" in cfg_arch.architectures:
             model = SanityCheckforPreTraining(cfg_arch.width, vocab_size)

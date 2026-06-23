@@ -18,6 +18,9 @@ from .recursive_refiner_hf import (
     RecursiveRefinerForMaskedLM,
     RecursiveRefinerForCausalLM,
     RecursiveRefinerForSequenceClassification,
+    RecursiveRefinerSingleHighForMaskedLM,
+    RecursiveRefinerSingleHighForCausalLM,
+    RecursiveRefinerSingleHighForSequenceClassification,
 )
 
 
@@ -45,7 +48,12 @@ def construct_recursive_refiner(cfg_arch, vocab_size: int, downstream_classes: O
 
     # Pick head based on explicit config and/or architecture name.
     arch_names = set(getattr(cfg_arch, "architectures", []) or [])
-    force_causal = ("RecursiveRefinerForCausalLM" in arch_names) or bool(getattr(config, "is_causal", False))
+    single_high = any(name.startswith("RecursiveRefinerSingleHigh") for name in arch_names)
+    force_causal = (
+        "RecursiveRefinerForCausalLM" in arch_names
+        or "RecursiveRefinerSingleHighForCausalLM" in arch_names
+        or bool(getattr(config, "is_causal", False))
+    )
 
     # Downstream sequence classification uses a dedicated head.
     if downstream_classes is not None:
@@ -54,16 +62,25 @@ def construct_recursive_refiner(cfg_arch, vocab_size: int, downstream_classes: O
         if not force_causal:
             config.is_causal = False
             config.is_decoder = False
-        model = RecursiveRefinerForSequenceClassification(config)
+        if single_high:
+            model = RecursiveRefinerSingleHighForSequenceClassification(config)
+        else:
+            model = RecursiveRefinerForSequenceClassification(config)
         model.vocab_size = config.vocab_size
         return model
 
     if force_causal:
         config.is_causal = True
-        model = RecursiveRefinerForCausalLM(config)
+        if single_high:
+            model = RecursiveRefinerSingleHighForCausalLM(config)
+        else:
+            model = RecursiveRefinerForCausalLM(config)
     else:
         config.is_causal = False
-        model = RecursiveRefinerForMaskedLM(config)
+        if single_high:
+            model = RecursiveRefinerSingleHighForMaskedLM(config)
+        else:
+            model = RecursiveRefinerForMaskedLM(config)
 
     # Cramming expects a vocab_size attribute in some utilities.
     model.vocab_size = config.vocab_size
