@@ -1,0 +1,43 @@
+# Recursive Refiner (local) architecture.
+#
+# This configuration is designed to work out-of-the-box with Cramming's default
+# MLM pretraining pipeline (cfg_pretrain.yaml). It constructs
+# ``RecursiveRefinerForMaskedLM`` and uses bidirectional attention.
+
+architectures:
+  - RecursiveRefinerForMaskedLM
+
+# Core dimensions (roughly analogous to a base BERT).
+hidden_size: 1024
+num_attention_heads: 16
+num_hidden_layers: 2
+
+# FFN expansion factor (SwiGLU).
+expansion: 4.0
+
+# Refinement schedule.
+hi_cycles: 3
+lo_cycles: 2
+
+# Factorized embedding rank: rank = hidden_size / embed_factor.
+embed_factor: 4
+
+# Normalization/positional encoding.
+pre_norm: true
+rms_eps: 1e-5
+rope_theta: 10000.0
+
+# Optional prefix/conditioning tokens.
+prefix_len: 0
+
+# Objective mode.
+is_causal: false
+
+# Special tokens.
+pad_token_id: 0
+bos_token_id: 1
+eos_token_id: 2
+
+# HF compatibility.
+use_cache: false
+max_position_embeddings: 512

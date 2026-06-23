@@ -1,0 +1,35 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Training outputs, logs, and checkpoints
+/outputs/
+/logs/
+/runs/
+/wandb/
+/tensorboard/
+/checkpoints/
+*.log
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Local training data and generated datasets
+/data/
+/datasets/
+/processed_data/
+/raw_data/
+
+# Local environment files
+.env
+.env.*
