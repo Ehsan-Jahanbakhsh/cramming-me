@@ -139,12 +139,12 @@ class LowRankEmbedding(nn.Module):
         W_full = W_tok (V x r) @ W_mid (r x r) @ W_out (r x D)
     where r = D // embed_factor.
 
-    If embed_factor == 1, this degenerates to:
-        W_full = W_tok (V x D) @ W_out (D x D)
-    and W_mid is omitted.
+    If embed_factor == 1, use a normal full V x D embedding with tied logits.
 
-    Embedding lookup:
+    Embedding lookup for embed_factor > 1:
         emb(ids) = W_tok[ids] @ W_mid @ W_out    -> [B, T, D]
+    Embedding lookup for embed_factor == 1:
+        emb(ids) = W_tok[ids]                    -> [B, T, D]
 
     Tied logits (no materialization of W_full):
         logits(x) = x @ W_full^T
@@ -167,28 +167,30 @@ class LowRankEmbedding(nn.Module):
         self.use_mid = n > 1
         if self.use_mid:
             self.mid = nn.Parameter(torch.empty(r, r))
+            self.out = nn.Parameter(torch.empty(r, dim))
         else:
             self.register_parameter("mid", None)
-        self.out = nn.Parameter(torch.empty(r, dim))
+            self.register_parameter("out", None)
 
         # init
         nn.init.normal_(self.tok.weight, mean=0.0, std=init_std)
         if self.use_mid:
             nn.init.normal_(self.mid, mean=0.0, std=init_std)
-        nn.init.normal_(self.out, mean=0.0, std=init_std)
+            nn.init.normal_(self.out, mean=0.0, std=init_std)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         x = self.tok(input_ids)  # [B, T, r]
         if self.use_mid:
             x = x @ self.mid      # [B, T, r]
-        x = x @ self.out          # [B, T, D]
+            x = x @ self.out      # [B, T, D]
         return x
 
     def logits(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, T, D] -> [B, T, V]
+        if not self.use_mid:
+            return F.linear(x, self.tok.weight)
         h = x @ self.out.t()               # [B, T, r]
-        if self.use_mid:
-            h = h @ self.mid.t()           # [B, T, r]
+        h = h @ self.mid.t()               # [B, T, r]
         return h @ self.tok.weight.t()     # [B, T, V]
 
     def resize_vocab(self, new_vocab_size: int) -> None:
