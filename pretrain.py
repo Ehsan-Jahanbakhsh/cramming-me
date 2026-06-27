@@ -140,6 +140,10 @@ def collect_stats(step, loss_vals, train_time, stats, model_engine, dataloader, 
     stats["lr"] += [current_lr]
     stats["batch_size"] += [model_engine.record_batch_size()]
     stats["seq_length"] = [model_engine.current_seq_length]
+    for key, value in model_engine.record_model_stats().items():
+        stats[key] += [value]
+    if "exit/avg_depth" in stats and len(stats["exit/avg_depth"]) > 0:
+        log_msg += f" Exit depth: {stats['exit/avg_depth'][-1]:2.2f} avg, {stats['exit/max_depth_frac'][-1]:2.2f} max-frac."
 
     # Publish
     cramming.utils.wandb_log(stats, cfg)

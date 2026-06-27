@@ -1,0 +1,49 @@
+# Early-exit Recursive Refiner (tiny).
+#
+# This is a new architecture path. The original Recursive Refiner configs and
+# implementation remain unchanged.
+
+architectures:
+  - RecursiveRefinerEarlyExitForMaskedLM
+
+hidden_size: 256
+num_attention_heads: 4
+num_hidden_layers: 2
+
+expansion: 4.0
+
+# Hard maximum number of high-recursion exits.
+hi_cycles: 2
+lo_cycles: 3
+
+embed_factor: 1
+
+pre_norm: true
+rms_eps: 1e-5
+rope_theta: 10000.0
+prefix_len: 0
+is_causal: false
+
+early_exit:
+  enabled: true
+  max_depth: ${arch.hi_cycles}
+  min_depth: 1
+  halt_threshold: 0.5
+  aux_loss_weight: 0.5
+  halt_loss_weight: 1.0
+  ponder_kl_weight: 0.01
+  halt_prior_lambda: 0.5
+  inference_enabled: true
+  fail_if_all_max: false
+
+prediction_feedback:
+  enabled: false
+  top_k: 16
+  temperature: 1.0
+  detach: true
+
+pad_token_id: 0
+bos_token_id: 1
+eos_token_id: 2
+use_cache: false
+max_position_embeddings: 512

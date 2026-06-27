@@ -117,9 +117,12 @@ def main_downstream_process(cfg, setup):
 def validate(model_engine, validloader, metric, setup, cfg):
     """Evaluate on validation set."""
     model_engine.eval()
+    exit_stats = defaultdict(list)
     for step, batch in enumerate(validloader):
         device_batch = model_engine.to_device(batch, keys=["input_ids", "labels", "attention_mask"])
         _, predictions = model_engine.forward_inference(**device_batch)
+        for key, value in model_engine.record_model_stats().items():
+            exit_stats[key].append(value)
 
         if getattr(metric, "config_name", "") != "multirc":
             metric.add_batch(predictions=predictions, references=device_batch["labels"])
@@ -136,6 +139,9 @@ def validate(model_engine, validloader, metric, setup, cfg):
     except ValueError:  # pearson corr computation will raise errors if metric values are NaN
         log.info("Value Error in metrics computation, maybe non-finite values in prediction. Returning backup score.")
         eval_metric = metric.compute(predictions=[0, 1], references=[1, 0])  # spoof terrible result if metric computation fails
+    for key, values in exit_stats.items():
+        if len(values) > 0:
+            eval_metric[key] = sum(values) / len(values)
     model_engine.train(cfg.eval.eval_in_train_mode)
     return {k: float(v) for k, v in eval_metric.items()}  # force float returns
 

@@ -131,12 +131,15 @@ class TorchEngineMinimal(torch.nn.Module):
 
         self.initial_time = time.time() - already_elapsed_time
         self.optimizer, self.scheduler = _load_optimizer(model, cfg_train, cfg_impl, self.initial_time)
+        self.latest_model_stats = {}
 
     def step(self, batch: dict[str, torch.Tensor]):
         self.accumulated_samples += self.effective_mbs
         context = self.model.no_sync if self.accumulated_samples < self.current_batch_size else nullcontext
         with context():
-            loss = self.forward(**batch)["loss"]
+            outputs = self.forward(**batch)
+            self.latest_model_stats = self._extract_model_stats(outputs)
+            loss = outputs["loss"]
             self.backward(loss)
             self.optimizer_step()
         return loss.detach()
@@ -154,13 +157,42 @@ class TorchEngineMinimal(torch.nn.Module):
         with torch.autocast(**self.amp_settings):
             return self.model(*inputs, **kwargs)
 
+    def _extract_model_stats(self, outputs):
+        stats = {}
+        try:
+            exit_stats = outputs.get("exit_stats", None)
+        except AttributeError:
+            exit_stats = None
+        if exit_stats is None:
+            return stats
+        for key, value in exit_stats.items():
+            try:
+                if torch.is_tensor(value):
+                    stats[key] = value.detach().float().mean()
+                else:
+                    stats[key] = float(value)
+            except (TypeError, ValueError):
+                pass
+        return stats
+
+    def record_model_stats(self):
+        stats = {}
+        for key, value in self.latest_model_stats.items():
+            if torch.is_tensor(value):
+                stats[key] = value.detach().float().mean().item()
+            else:
+                stats[key] = float(value)
+        return stats
+
     def backward(self, loss):
         return self.scaler.scale(loss / self.accumulation_steps_expected).backward()
 
     @torch.no_grad()
     def forward_inference(self, *inputs, **kwargs):
         with torch.autocast(**self.amp_settings):
-            outputs = self.model(*inputs, **kwargs)["logits"]
+            model_outputs = self.model(*inputs, **kwargs)
+            self.latest_model_stats = self._extract_model_stats(model_outputs)
+            outputs = model_outputs["logits"]
         if outputs.shape[-1] == 1:
             predictions = outputs.squeeze(dim=-1)
         else:

@@ -6,6 +6,8 @@ from .recurrent_transformers import construct_scriptable_recurrent
 from .sanity_check import SanityCheckforPreTraining
 from .crammed_bert import construct_crammed_bert
 from .recursive_refiner import construct_recursive_refiner
+from .recursive_refiner_early_exit import construct_recursive_refiner_early_exit
+from .albert_early_exit import construct_albert_early_exit
 
 import logging
 from ..utils import is_main_process
@@ -25,6 +27,13 @@ def construct_model(cfg_arch, vocab_size, downstream_classes=None):
             model = construct_scriptable_recurrent(cfg_arch, vocab_size, downstream_classes)
         elif "RecursiveRefinerForMaskedLM" in cfg_arch.architectures or "RecursiveRefinerForCausalLM" in cfg_arch.architectures:
             model = construct_recursive_refiner(cfg_arch, vocab_size, downstream_classes)
+        elif (
+            "RecursiveRefinerEarlyExitForMaskedLM" in cfg_arch.architectures
+            or "RecursiveRefinerEarlyExitForSequenceClassification" in cfg_arch.architectures
+        ):
+            model = construct_recursive_refiner_early_exit(cfg_arch, vocab_size, downstream_classes)
+        elif "AlbertEarlyExitForMaskedLM" in cfg_arch.architectures or "AlbertEarlyExitForSequenceClassification" in cfg_arch.architectures:
+            model = construct_albert_early_exit(cfg_arch, vocab_size, downstream_classes)
         elif "SanityCheckLM" in cfg_arch.architectures:
             model = SanityCheckforPreTraining(cfg_arch.width, vocab_size)
 
