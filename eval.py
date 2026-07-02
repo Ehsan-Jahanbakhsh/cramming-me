@@ -32,7 +32,8 @@ def main_downstream_process(cfg, setup):
         # Prepare model for finetuning:
         model = cramming.construct_model(cfg_arch, tokenizer.vocab_size, downstream_classes=task["num_classes"])
         model_engine, _, _, _ = cramming.load_backend(model, None, tokenizer, cfg.eval, cfg.impl, setup=setup)
-        model_engine.load_checkpoint(cfg_arch, model_file)
+        if model_file is not None:
+            model_engine.load_checkpoint(cfg_arch, model_file)
 
         try:
             assert task_name != "record"

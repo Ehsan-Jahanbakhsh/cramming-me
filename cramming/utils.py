@@ -191,7 +191,15 @@ def num_processes():
 def find_pretrained_checkpoint(cfg, downstream_classes=None):
     """Load a checkpoint either locally or from the internet."""
     local_checkpoint_folder = os.path.join(cfg.base_dir, cfg.name, "checkpoints")
-    if cfg.eval.checkpoint == "latest":
+    checkpoint_name = None
+    if cfg.eval.checkpoint in ["random", "none", "untrained"]:
+        tokenizer = load_tokenizer_from_data_config(cfg)
+        cfg_arch = cfg.arch
+        if cfg.eval.arch_modifications is not None:
+            cfg_arch = OmegaConf.merge(cfg_arch, cfg.eval.arch_modifications)
+        model_file = None
+        log.info("Using randomly initialized model weights for downstream finetuning.")
+    elif cfg.eval.checkpoint == "latest":
         # Load the latest local checkpoint
         all_checkpoints = [f for f in os.listdir(local_checkpoint_folder)]
         checkpoint_paths = [os.path.join(local_checkpoint_folder, c) for c in all_checkpoints]
@@ -235,8 +243,60 @@ def find_pretrained_checkpoint(cfg, downstream_classes=None):
 
         print(cfg_arch)
 
-    log.info(f"Loading from checkpoint {model_file}...")
+    if model_file is not None:
+        log.info(f"Loading from checkpoint {model_file}...")
     return tokenizer, cfg_arch, model_file
+
+
+def load_tokenizer_from_data_config(cfg):
+    """Load only the tokenizer described by cfg.data for random-init downstream runs."""
+    from .data.tokenizer_preparation import load_tokenizer
+
+    cfg_data = cfg.data
+    cfg_impl = cfg.impl
+    provider = list(cfg_data.sources.values())[0]["provider"]
+
+    if provider == "fake":
+        tokenizer = load_tokenizer(cfg_data.tokenizer, cfg_data.seq_length, cfg_data.vocab_size, cache_dir=cfg_impl.path)
+        tokenizer.model_max_length = cfg_data.seq_length
+        return tokenizer
+
+    checksum = checksum_config(cfg_data)
+    data_path = os.path.join(cfg_impl.path, f"{cfg_data.name}_{checksum}")
+    tokenizer_path = os.path.join(data_path, "tokenizer")
+
+    if provider == "hub":
+        from huggingface_hub import hf_hub_download
+
+        tokenizer_req_files = ["special_tokens_map.json", "tokenizer.json", "tokenizer_config.json"]
+        if all(os.path.isfile(os.path.join(tokenizer_path, file)) for file in tokenizer_req_files):
+            return load_tokenizer(tokenizer_path, seq_length=cfg_data.seq_length, vocab_size=cfg_data.vocab_size, cache_dir=data_path)
+
+        os.makedirs(tokenizer_path, exist_ok=True)
+        for file in tokenizer_req_files:
+            hf_hub_download(
+                cfg_data.hf_location,
+                file,
+                subfolder="tokenizer",
+                repo_type="dataset",
+                local_dir=data_path,
+            )
+        return load_tokenizer(tokenizer_path, seq_length=cfg_data.seq_length, vocab_size=cfg_data.vocab_size, cache_dir=data_path)
+
+    if os.path.isdir(tokenizer_path):
+        return load_tokenizer(tokenizer_path, seq_length=cfg_data.seq_length, vocab_size=cfg_data.vocab_size, cache_dir=cfg_impl.path)
+
+    if cfg_impl.forbid_dataset_preprocessing:
+        raise ValueError(
+            f"Cannot find tokenizer at path {tokenizer_path}. Dataset preprocessing disabled. "
+            "Dataset preprocessing can be enabled with 'impl.forbid_dataset_preprocessing=False'."
+        )
+
+    log.info("Tokenizer was not found in the processed dataset cache. Preparing the pretraining corpus to create it.")
+    from .data.pretraining_preparation import load_pretraining_corpus
+
+    _, tokenizer = load_pretraining_corpus(cfg_data, cfg_impl)
+    return tokenizer
 
 
 def save_summary(table_name, cfg, stats, local_time, setup, original_cwd=True):
