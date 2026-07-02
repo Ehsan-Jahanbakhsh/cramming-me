@@ -13,6 +13,11 @@ from ..backend.utils import prepare_downstream_dataloader
 
 log = logging.getLogger(__name__)
 
+HF_DATASET_COLLECTION_ALIASES = {
+    "glue": "nyu-mll/glue",
+    "super_glue": "aps/super_glue",
+}
+
 
 def prepare_task_dataloaders(tokenizer, cfg_eval, cfg_impl):
     """Load all datasets in eval.tasks for finetuning and testing."""
@@ -24,9 +29,10 @@ def prepare_task_dataloaders(tokenizer, cfg_eval, cfg_impl):
     for task_name, task_details in cfg_eval.tasks.items():
         log.info(f"Preparing data for task {task_details.collection}-{task_name}.")
         tasks[task_name]["details"] = task_details
-        raw_datasets = load_dataset(task_details.collection, task_name, cache_dir=cfg_impl.path)
+        collection = HF_DATASET_COLLECTION_ALIASES.get(task_details.collection, task_details.collection)
+        raw_datasets = load_dataset(collection, task_name, cache_dir=cfg_impl.path)
         if "train_data_source" in task_details:  # some superGLUE tasks do not include train data
-            raw_data_train = load_dataset(task_details.collection, task_details.train_data_source, cache_dir=cfg_impl.path)
+            raw_data_train = load_dataset(collection, task_details.train_data_source, cache_dir=cfg_impl.path)
             if cfg_eval.tasks["rte"].structure != task_details.structure:
                 for new_name, old_name in zip(task_details.structure, cfg_eval.tasks["rte"].structure):
                     raw_data_train = raw_data_train.rename_column(old_name, new_name)
