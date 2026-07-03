@@ -17,9 +17,9 @@ L_cycles: 3
 
 # Paper-style max recursive supervision depth. Sweep this lower when testing
 # cost/quality tradeoffs.
-deep_supervision_steps: 16
-inference_steps: 16
-halt_max_steps: 16
+deep_supervision_steps: 2
+inference_steps: 2
+halt_max_steps: 2
 act_training: true
 halt_exploration_prob: 0.1
 no_ACT_continue: true
