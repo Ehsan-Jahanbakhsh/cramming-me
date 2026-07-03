@@ -7,8 +7,8 @@ architectures:
   - TRMForMaskedLM
 
 # Core dimensions.
-hidden_size: 256
-num_attention_heads: 8
+hidden_size: 128
+num_attention_heads: 2
 num_hidden_layers: 2
 
 # TRM recursion schedule from the paper recipe.
@@ -20,7 +20,7 @@ L_cycles: 3
 deep_supervision_steps: 2
 inference_steps: 2
 halt_max_steps: 2
-act_training: true
+act_training: false
 halt_exploration_prob: 0.1
 no_ACT_continue: true
 q_halt_loss_weight: 0.5
