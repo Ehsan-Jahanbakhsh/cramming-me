@@ -658,15 +658,9 @@ class TRMForMaskedLM(TRMPreTrainedModel):
 
     def _lm_loss(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         valid_mask = labels != IGNORE_LABEL_ID
-        if not valid_mask.any():
-            return logits.sum() * 0.0
-
-        flat_logits = logits[valid_mask]
-        flat_labels = labels[valid_mask]
-        token_loss = self._token_loss(flat_logits, flat_labels)
-        seq_ids = torch.arange(labels.shape[0], device=labels.device).unsqueeze(1).expand_as(labels)[valid_mask]
-        per_seq_loss = token_loss.new_zeros((labels.shape[0],))
-        per_seq_loss.scatter_add_(0, seq_ids, token_loss)
+        safe_labels = torch.where(valid_mask, labels, torch.zeros_like(labels))
+        token_loss = self._token_loss(logits.reshape(-1, logits.shape[-1]), safe_labels.reshape(-1)).reshape_as(labels)
+        per_seq_loss = (token_loss * valid_mask.to(token_loss.dtype)).sum(dim=-1)
         loss_counts = valid_mask.sum(dim=-1).clamp_min(1).to(token_loss.dtype)
         return (per_seq_loss / loss_counts).mean()
 
