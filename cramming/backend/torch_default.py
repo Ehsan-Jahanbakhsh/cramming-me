@@ -170,8 +170,10 @@ class TorchEngineMinimal(torch.nn.Module):
     def optimizer_step(self):
         """Requires a scheduler that is based on iterations instead of epochs."""
         self.steps += 1
+        did_update = False
         if self.accumulated_samples >= self.current_batch_size:
             self.accumulated_samples = 0
+            did_update = True
 
             if self.cfg_train.gradient_clipping is not None:
                 self.scaler.unscale_(self.optimizer)
@@ -181,6 +183,7 @@ class TorchEngineMinimal(torch.nn.Module):
             self.optimizer.zero_grad()
             self.schedule_batch_size()
         self.scheduler.step()  # Trigger in every step, otherwise things get annoying with grad accumulation
+        return did_update
 
     def set_train_batch_size(self, batch_size):
         """Allow dynamic modifications of batch size."""
@@ -288,6 +291,9 @@ class TorchEngineMinimal(torch.nn.Module):
         save_state["scheduler"] = self.scheduler.state_dict()
         save_state["scaler"] = self.scaler.state_dict()
         save_state["metadata"] = metadata
+        extra_state = self._extra_checkpoint_state()
+        if extra_state:
+            save_state["engine"] = extra_state
         torch.save(save_state, file)
 
     def load_training_checkpoint(self, identifier="intermediate.pth", directory=""):
@@ -299,8 +305,15 @@ class TorchEngineMinimal(torch.nn.Module):
         self.optimizer.load_state_dict(save_state["optim"])
         self.scheduler.load_state_dict(save_state["scheduler"])
         self.scaler.load_state_dict(save_state["scaler"])
+        self._load_extra_checkpoint_state(save_state.get("engine", {}))
         log.info(f"Sucessfully loaded state with metadata {save_state['metadata']}")
         return save_state["metadata"]
+
+    def _extra_checkpoint_state(self):
+        return {}
+
+    def _load_extra_checkpoint_state(self, state):
+        return None
 
     def save_final_model(self, base_directory, identifier, tokenizer, cfg_arch, dryrun=False):
         """This checkpoint can be used for downstream tasks.
@@ -381,9 +394,16 @@ class TorchEngineFull(TorchEngineMinimal):
     See TorchEngineFull for more modifications.
     """
 
-    def __init__(self, model, cfg_train, cfg_impl, setup=_default_setup, seq_length=128):
+    def __init__(self, model, cfg_train, cfg_impl, already_elapsed_time=0.0, setup=_default_setup, seq_length=128):
         """Load Engine. The model will be compiled by default."""
-        super().__init__(model, cfg_train, cfg_impl, setup, seq_length)
+        super().__init__(
+            model,
+            cfg_train,
+            cfg_impl,
+            already_elapsed_time=already_elapsed_time,
+            setup=setup,
+            seq_length=seq_length,
+        )
 
         # Optional sequence curriculum:
         self.sequence_curriculum = "sequence_curriculum" in cfg_train
@@ -396,18 +416,17 @@ class TorchEngineFull(TorchEngineMinimal):
             self.weight_averaging_frequency = cfg_train.weight_averaging.frequency
             self.weight_averaging = cfg_train.weight_averaging
             if self.weight_averaging.type == "EMA":
-                self.param_store = [p.detach().clone() for p in model.parameters()]  # keep on CPU
-                self.buffer_store = [b.detach().clone() for b in model.buffers()]
+                self.param_store = [p.detach().cpu().clone() for p in self.model.parameters()]
+                self.buffer_store = [b.detach().cpu().clone() for b in self.model.buffers()]
             else:
                 self.store = []
         else:
             self.weight_averaging_frequency = 0
-        self.initial_time = time.time()
 
     def optimizer_step(self):
         """Requires a scheduler that is based on iterations instead of epochs."""
-        super().optimizer_step()
-        if self.accumulated_samples >= self.current_batch_size:
+        did_update = super().optimizer_step()
+        if did_update:
             self.schedule_curriculum()
             self.moving_average_computation()
 
@@ -444,14 +463,14 @@ class TorchEngineFull(TorchEngineMinimal):
     def record_tokens_per_step(self):
         """Tokens in each microbatch step."""
         if not self.sequence_curriculum:
-            return self.current_seq_length * self.cfg_impl.microbatch_size
+            return self.current_seq_length * self.effective_mbs
         else:
             if self.sequence_unfold:
                 # Same number of tokens in this case:
-                return self.current_seq_length * (self.data_seq_length // self.current_seq_length) * self.cfg_impl.microbatch_size
+                return self.current_seq_length * (self.data_seq_length // self.current_seq_length) * self.effective_mbs
             else:
                 # Reduced number of tokens here:
-                return self.current_seq_length * self.cfg_impl.microbatch_size
+                return self.current_seq_length * self.effective_mbs
 
     def moving_average_computation(self):
         if self.weight_averaging_frequency > 0:
@@ -468,15 +487,52 @@ class TorchEngineFull(TorchEngineMinimal):
     @torch.no_grad()
     def retrieve_model_state_dict(self):
         if self.weight_averaging_frequency > 0:
-            # Use weight averaged weights
-            for param, param_ma in zip(self.model.parameters(), self.param_store):
-                param.copy_(param_ma.data)
-            for buffer, buffer_ma in zip(self.model.buffers(), self.buffer_store):
-                buffer.copy_(buffer_ma.data)
-            return self.model.state_dict()
+            params = list(self.model.parameters())
+            buffers = list(self.model.buffers())
+            param_backup = [p.detach().cpu().clone() for p in params]
+            buffer_backup = [b.detach().cpu().clone() for b in buffers]
+            try:
+                for param, param_ma in zip(params, self.param_store):
+                    param.copy_(param_ma.data.to(device=param.device, dtype=param.dtype))
+                for buffer, buffer_ma in zip(buffers, self.buffer_store):
+                    buffer.copy_(buffer_ma.data.to(device=buffer.device, dtype=buffer.dtype))
+                return super().retrieve_model_state_dict()
+            finally:
+                for param, param_orig in zip(params, param_backup):
+                    param.copy_(param_orig.to(device=param.device, dtype=param.dtype))
+                for buffer, buffer_orig in zip(buffers, buffer_backup):
+                    buffer.copy_(buffer_orig.to(device=buffer.device, dtype=buffer.dtype))
         else:
             # Else use normal state dict
-            return self.model.state_dict()
+            return super().retrieve_model_state_dict()
+
+    def _extra_checkpoint_state(self):
+        state = {}
+        if self.weight_averaging_frequency > 0 and hasattr(self, "param_store"):
+            state["weight_averaging"] = {
+                "param_store": self.param_store,
+                "buffer_store": self.buffer_store,
+                "store": getattr(self, "store", None),
+            }
+        if self.sequence_curriculum:
+            state["sequence_curriculum"] = {"current_seq_length": self.current_seq_length}
+        return state
+
+    def _load_extra_checkpoint_state(self, state):
+        if not state:
+            return None
+
+        averaging_state = state.get("weight_averaging")
+        if averaging_state is not None and self.weight_averaging_frequency > 0:
+            self.param_store = averaging_state["param_store"]
+            self.buffer_store = averaging_state["buffer_store"]
+            if averaging_state.get("store") is not None:
+                self.store = averaging_state["store"]
+
+        curriculum_state = state.get("sequence_curriculum")
+        if curriculum_state is not None and self.sequence_curriculum:
+            self.current_seq_length = curriculum_state.get("current_seq_length", self.current_seq_length)
+        return None
 
     def gradinit(self, data_iterable, optim_cfg, gradinit_cfg):
         """Run data-based initialization search as described in Zhu et al.,

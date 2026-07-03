@@ -13,15 +13,43 @@ selected parameters and an AdamW optimizer for the remainder.
 
 from __future__ import annotations
 
+import inspect
+import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import torch
 from torch.optim import Optimizer
 
+log = logging.getLogger(__name__)
+
 
 def _matches_any_substring(name: str, substrings: Sequence[str]) -> bool:
-    return any(s in name for s in substrings)
+    lowered_name = name.lower()
+    return any(s and s.lower() in lowered_name for s in substrings)
+
+
+def _optional_int(value: Any, default: Optional[int]) -> Optional[int]:
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
+def _filter_supported_kwargs(callable_obj: Any, kwargs: Dict[str, Any], label: str) -> Dict[str, Any]:
+    try:
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return kwargs
+
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return kwargs
+
+    supported = set(parameters)
+    filtered = {k: v for k, v in kwargs.items() if k in supported}
+    dropped = sorted(set(kwargs) - set(filtered))
+    if dropped:
+        log.warning("Dropping unsupported %s optimizer args for this PyTorch build: %s", label, dropped)
+    return filtered
 
 
 @dataclass(frozen=True)
@@ -37,12 +65,13 @@ def split_parameters_for_muon(
     limited_decay_keys: Sequence[str],
     muon_exclude_name_substrings: Sequence[str],
     muon_min_ndim: int = 2,
+    muon_max_ndim: Optional[int] = 2,
 ) -> MuonSplit:
     """Split model parameters into Muon vs auxiliary (AdamW) groups.
 
     Heuristic:
-      - Muon: parameters with ndim >= `muon_min_ndim` (typically 2D matrices)
-        whose *name* does not match any exclusion substring.
+      - Muon: hidden matrix parameters whose ndim is in the configured range
+        (2D by default) and whose name does not match any exclusion substring.
       - Aux/AdamW: everything else.
       - For aux params, apply Cramming's `limited_decay_keys` convention to create
         a no-decay group.
@@ -56,7 +85,8 @@ def split_parameters_for_muon(
         if not p.requires_grad:
             continue
 
-        is_muon_candidate = (p.ndim >= muon_min_ndim) and not _matches_any_substring(name, muon_exclude_name_substrings)
+        in_ndim_range = p.ndim >= muon_min_ndim and (muon_max_ndim is None or p.ndim <= muon_max_ndim)
+        is_muon_candidate = in_ndim_range and not _matches_any_substring(name, muon_exclude_name_substrings)
 
         if is_muon_candidate:
             muon_params.append(p)
@@ -102,7 +132,10 @@ class MuonWithAuxAdamW(Optimizer):
 
         super().__init__(param_groups, defaults)
 
-        if not hasattr(torch.optim, "Muon"):
+        if len(param_groups) == 0:
+            raise ValueError("MuonWithAuxAdamW received no trainable parameters.")
+
+        if len(muon_group_indices) > 0 and not hasattr(torch.optim, "Muon"):
             raise RuntimeError(
                 "torch.optim.Muon was not found. Install PyTorch >= 2.9 or vendor a Muon implementation."
             )
@@ -137,23 +170,34 @@ class MuonWithAuxAdamW(Optimizer):
             self._wrapper_to_aux[idx] = j
 
         # Initialize internal optimizers.
-        self._muon = torch.optim.Muon(muon_param_groups, **self._muon_kwargs)
+        if len(muon_param_groups) > 0:
+            muon_init_kwargs = _filter_supported_kwargs(torch.optim.Muon, self._muon_kwargs, "Muon")
+            self._muon: Optional[Optimizer] = torch.optim.Muon(muon_param_groups, **muon_init_kwargs)
+        else:
+            self._muon = None
 
         # AdamW supports optional fused/foreach flags in newer PyTorch versions.
         # Only pass keys that are not None / not empty.
-        aux_init_kwargs = dict(self._aux_kwargs)
-        self._aux = torch.optim.AdamW(aux_param_groups, **aux_init_kwargs)
+        if len(aux_param_groups) > 0:
+            aux_init_kwargs = _filter_supported_kwargs(torch.optim.AdamW, dict(self._aux_kwargs), "AdamW")
+            self._aux: Optional[Optimizer] = torch.optim.AdamW(aux_param_groups, **aux_init_kwargs)
+        else:
+            self._aux = None
 
     def _sync_group_lrs(self) -> None:
         """Sync wrapper learning rates (and weight decay) into internal optimizers."""
 
         for wrapper_idx, muon_idx in self._wrapper_to_muon.items():
+            if self._muon is None:
+                continue
             wg = self.param_groups[wrapper_idx]
             ig = self._muon.param_groups[muon_idx]
             ig["lr"] = wg["lr"]
             ig["weight_decay"] = wg.get("weight_decay", 0.0)
 
         for wrapper_idx, aux_idx in self._wrapper_to_aux.items():
+            if self._aux is None:
+                continue
             wg = self.param_groups[wrapper_idx]
             ig = self._aux.param_groups[aux_idx]
             ig["lr"] = wg["lr"]
@@ -167,24 +211,37 @@ class MuonWithAuxAdamW(Optimizer):
             with torch.enable_grad():
                 loss = closure()
         # Order is not mathematically important for these two optimizers.
-        self._muon.step()
-        self._aux.step()
+        if self._muon is not None:
+            self._muon.step()
+        if self._aux is not None:
+            self._aux.step()
         return loss
 
     def zero_grad(self, set_to_none: bool = True):
         # Keep wrapper semantics consistent with Optimizer.
-        self._muon.zero_grad(set_to_none=set_to_none)
-        self._aux.zero_grad(set_to_none=set_to_none)
+        if self._muon is not None:
+            self._muon.zero_grad(set_to_none=set_to_none)
+        if self._aux is not None:
+            self._aux.zero_grad(set_to_none=set_to_none)
 
     def state_dict(self) -> Dict[str, Any]:
         return {
-            "muon": self._muon.state_dict(),
-            "aux": self._aux.state_dict(),
+            "wrapper": super().state_dict(),
+            "muon": self._muon.state_dict() if self._muon is not None else None,
+            "aux": self._aux.state_dict() if self._aux is not None else None,
         }
 
     def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
-        self._muon.load_state_dict(state_dict["muon"])
-        self._aux.load_state_dict(state_dict["aux"])
+        if "wrapper" in state_dict:
+            super().load_state_dict(state_dict["wrapper"])
+
+        muon_state = state_dict.get("muon")
+        aux_state = state_dict.get("aux")
+        if self._muon is not None and muon_state is not None:
+            self._muon.load_state_dict(muon_state)
+        if self._aux is not None and aux_state is not None:
+            self._aux.load_state_dict(aux_state)
+        self._sync_group_lrs()
 
 
 def build_muon_with_aux_adamw(model: torch.nn.Module, cfg_train, cfg_impl) -> MuonWithAuxAdamW:
@@ -199,18 +256,25 @@ def build_muon_with_aux_adamw(model: torch.nn.Module, cfg_train, cfg_impl) -> Mu
         "position_embeddings",
         "pos_embedding",
         "lm_head",
+        "q_head",
+        "head",
         "cls",
         "classifier",
+        "decoder",
+        "pooler",
+        "score",
     ]
 
     muon_excludes = list(getattr(cfg_train.optim, "muon_exclude_name_substrings", default_excludes) or default_excludes)
     muon_min_ndim = int(getattr(cfg_train.optim, "muon_min_ndim", 2))
+    muon_max_ndim = _optional_int(getattr(cfg_train.optim, "muon_max_ndim", 2), 2)
 
     split = split_parameters_for_muon(
         model,
         limited_decay_keys=getattr(cfg_train, "limited_decay_keys", []),
         muon_exclude_name_substrings=muon_excludes,
         muon_min_ndim=muon_min_ndim,
+        muon_max_ndim=muon_max_ndim,
     )
 
     # Hyperparameters.
@@ -227,6 +291,7 @@ def build_muon_with_aux_adamw(model: torch.nn.Module, cfg_train, cfg_impl) -> Mu
     muon_ns_steps = int(getattr(cfg_train.optim, "muon_ns_steps", 5))
     muon_eps = float(getattr(cfg_train.optim, "muon_eps", 1e-7))
     muon_adjust_lr_fn = getattr(cfg_train.optim, "muon_adjust_lr_fn", None)
+    muon_ns_coefficients = getattr(cfg_train.optim, "muon_ns_coefficients", None)
 
     # Wrapper param groups.
     param_groups: List[Dict[str, Any]] = []
@@ -272,6 +337,8 @@ def build_muon_with_aux_adamw(model: torch.nn.Module, cfg_train, cfg_impl) -> Mu
     }
     if muon_adjust_lr_fn is not None and muon_adjust_lr_fn != "":
         muon_kwargs["adjust_lr_fn"] = muon_adjust_lr_fn
+    if muon_ns_coefficients is not None and muon_ns_coefficients != "":
+        muon_kwargs["ns_coefficients"] = tuple(float(x) for x in muon_ns_coefficients)
 
     aux_kwargs: Dict[str, Any] = {}
     # Cramming optionally enables foreach mode for optimizers.

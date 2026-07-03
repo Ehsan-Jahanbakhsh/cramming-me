@@ -19,15 +19,18 @@ muon_momentum: 0.95
 muon_nesterov: True
 muon_ns_steps: 5
 muon_eps: 1e-7
+muon_ns_coefficients:
 
 # If set, passed through to torch.optim.Muon(adjust_lr_fn=...).
 # Valid values are defined by PyTorch; leaving this empty uses Muon's default.
 muon_adjust_lr_fn: ""
 
 # Parameter selection heuristics.
-# Muon candidates are parameters with ndim >= muon_min_ndim whose *name* does NOT
-# contain any of these substrings.
+# Muon candidates are parameters with muon_min_ndim <= ndim <= muon_max_ndim
+# whose *name* does NOT contain any of these substrings. Set muon_max_ndim to
+# null to allow higher-rank tensors.
 muon_min_ndim: 2
+muon_max_ndim: 2
 muon_exclude_name_substrings:
   - embeddings
   - embedding
@@ -36,5 +39,10 @@ muon_exclude_name_substrings:
   - position_embeddings
   - pos_embedding
   - lm_head
+  - q_head
+  - head
   - cls
   - classifier
+  - decoder
+  - pooler
+  - score

@@ -37,25 +37,40 @@ def group_parameters(model, cfg_train):
 def update_ema(model_parameters, ema_parameters, model_buffers, ema_buffers, momentum=0.995):
     """Update exponential moving average in parameters and buffers."""
     with torch.no_grad():
-        torch._foreach_mul(ema_parameters, momentum)  # want to prevent a second call here, but doesnt seem possible as of now?
-        torch._foreach_add_(ema_parameters, model_parameters, alpha=1 - momentum)
+        if len(ema_parameters) > 0:
+            torch._foreach_mul_(ema_parameters, momentum)
+            torch._foreach_add_(ema_parameters, model_parameters, alpha=1 - momentum)
 
-        torch._foreach_mul(ema_buffers, momentum)
-        torch._foreach_add_(ema_buffers, model_buffers, alpha=1 - momentum)
+        floating_buffer_pairs = [(model, ema) for model, ema in zip(model_buffers, ema_buffers) if torch.is_floating_point(ema)]
+        if len(floating_buffer_pairs) > 0:
+            model_floating, ema_floating = zip(*floating_buffer_pairs)
+            torch._foreach_mul_(ema_floating, momentum)
+            torch._foreach_add_(ema_floating, model_floating, alpha=1 - momentum)
+
+        for model_buffer, ema_buffer in zip(model_buffers, ema_buffers):
+            if not torch.is_floating_point(ema_buffer):
+                ema_buffer.copy_(model_buffer)
 
 
 def updated_latest_weight_average(model_parameters, model_buffers, store, last_k=10):
+    store.append(dict(params=model_parameters, buffers=model_buffers))
     if len(store) > last_k:
         store.pop(0)
 
-    store.append(dict(params=model_parameters, buffers=model_buffers))
-    param_store = store[0]["params"]
+    param_store = [p.clone() for p in store[0]["params"]]
     [torch._foreach_add_(param_store, storage["params"]) for storage in store[1:]]
-    torch._foreach_div(param_store, float(last_k))
+    torch._foreach_div_(param_store, float(len(store)))
 
-    buffer_store = store[0]["buffers"]
-    [torch._foreach_add_(buffer_store, storage["buffers"]) for storage in store[1:]]
-    torch._foreach_div(buffer_store, float(last_k))
+    buffer_store = [b.clone() for b in store[0]["buffers"]]
+    floating_indices = [idx for idx, buffer in enumerate(buffer_store) if torch.is_floating_point(buffer)]
+    if len(floating_indices) > 0:
+        floating_buffers = [buffer_store[idx] for idx in floating_indices]
+        for storage in store[1:]:
+            torch._foreach_add_(floating_buffers, [storage["buffers"][idx] for idx in floating_indices])
+        torch._foreach_div_(floating_buffers, float(len(store)))
+    for idx, buffer in enumerate(buffer_store):
+        if not torch.is_floating_point(buffer):
+            buffer.copy_(store[-1]["buffers"][idx])
 
     return param_store, buffer_store
 

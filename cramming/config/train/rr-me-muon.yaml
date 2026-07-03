@@ -12,20 +12,26 @@ limited_decay_keys: [bias, LayerNorm.bias, LayerNorm.weight, norm] # no weight d
 optim:
   lr: 8e-4
   muon_lr: 0.008
+  muon_weight_decay: 0.1
+  muon_max_ndim: 2
 
 # Steps:
-warmup_steps: 1_000
+warmup_steps: 2_000
 cooldown_steps: 0
 steps: 1_500_000 # these are microbatch steps # This is an upper limit that is usually never reached
 scheduler: budget-cosine-decay
 
 # Training settings:
-microbatch_size: 64
 batch_size: 4096
 batch_size_ramp: 0.1 # in percentage points, i.e. training reaches the target 8192 at 60% of the total budget.
 
-gradient_clipping:
+gradient_clipping: 0.5
 pretrain_in_train_mode: False # default BERT trains with dropout layers
+
+weight_averaging:
+  type: EMA
+  frequency: 1
+  momentum: 0.999
 
 objective:
   name: masked-lm
