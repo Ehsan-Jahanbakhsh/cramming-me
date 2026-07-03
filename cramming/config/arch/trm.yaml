@@ -1,0 +1,49 @@
+# Tiny Recursive Model for masked language modeling.
+#
+# This is a TRM-style architecture adapted from
+# SamsungSAILMontreal/TinyRecursiveModels for Cramming's normal MLM pipeline.
+# It uses a single shared reasoning stack, H_cycles - 1 no-grad refinement
+# cycles, and one differentiable refinement cycle per deep-supervision step.
+
+architectures:
+  - TRMForMaskedLM
+
+# Core dimensions.
+hidden_size: 512
+num_attention_heads: 8
+num_hidden_layers: 2
+
+# TRM recursion schedule. Upstream defaults are H_cycles=3, L_cycles=6.
+H_cycles: 3
+L_cycles: 6
+
+# Optional repeated supervision inside one Cramming forward call. Increase this
+# toward the upstream halt_max_steps=16 recipe when compute permits.
+deep_supervision_steps: 1
+inference_steps: 1
+halt_max_steps: 1
+act_training: false
+halt_exploration_prob: 0.0
+no_ACT_continue: true
+q_halt_loss_weight: 0.5
+
+# Transformer block settings.
+expansion: 4.0
+pos_encodings: rope
+rms_norm_eps: 1e-5
+rope_theta: 10000.0
+mlp_t: false
+
+# MLM wrapper settings.
+loss_type: stablemax_cross_entropy
+forward_dtype: bfloat16
+prefix_len: 0
+
+# Special tokens.
+pad_token_id: 0
+bos_token_id: 1
+eos_token_id: 2
+
+# HF compatibility.
+use_cache: false
+max_position_embeddings: 512

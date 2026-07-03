@@ -6,6 +6,7 @@ from .recurrent_transformers import construct_scriptable_recurrent
 from .sanity_check import SanityCheckforPreTraining
 from .crammed_bert import construct_crammed_bert
 from .recursive_refiner import construct_recursive_refiner
+from .trm import construct_trm
 
 import logging
 from ..utils import is_main_process
@@ -25,6 +26,12 @@ def construct_model(cfg_arch, vocab_size, downstream_classes=None):
             model = construct_scriptable_recurrent(cfg_arch, vocab_size, downstream_classes)
         elif "RecursiveRefinerForMaskedLM" in cfg_arch.architectures or "RecursiveRefinerForCausalLM" in cfg_arch.architectures:
             model = construct_recursive_refiner(cfg_arch, vocab_size, downstream_classes)
+        elif (
+            "TRMForMaskedLM" in cfg_arch.architectures
+            or "TRMforMaskedLM" in cfg_arch.architectures
+            or "TRMForSequenceClassification" in cfg_arch.architectures
+        ):
+            model = construct_trm(cfg_arch, vocab_size, downstream_classes)
         elif "SanityCheckLM" in cfg_arch.architectures:
             model = SanityCheckforPreTraining(cfg_arch.width, vocab_size)
 

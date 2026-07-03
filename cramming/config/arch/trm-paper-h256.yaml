@@ -1,0 +1,47 @@
+# TRM paper-shape config scaled to hidden_size 256.
+#
+# Upstream TRM uses hidden_size=512 and num_heads=8. At hidden_size=256 we
+# can keep 8 heads exactly, giving head_dim=32.
+
+architectures:
+  - TRMForMaskedLM
+
+# Core dimensions.
+hidden_size: 256
+num_attention_heads: 8
+num_hidden_layers: 2
+
+# TRM recursion schedule from the paper recipe.
+H_cycles: 3
+L_cycles: 6
+
+# Paper-style max recursive supervision depth. Sweep this lower when testing
+# cost/quality tradeoffs.
+deep_supervision_steps: 16
+inference_steps: 16
+halt_max_steps: 16
+act_training: true
+halt_exploration_prob: 0.1
+no_ACT_continue: true
+q_halt_loss_weight: 0.5
+
+# Transformer block settings.
+expansion: 4.0
+pos_encodings: rope
+rms_norm_eps: 1e-5
+rope_theta: 10000.0
+mlp_t: false
+
+# MLM wrapper settings.
+loss_type: stablemax_cross_entropy
+forward_dtype: bfloat16
+prefix_len: 0
+
+# Special tokens.
+pad_token_id: 0
+bos_token_id: 1
+eos_token_id: 2
+
+# HF compatibility.
+use_cache: false
+max_position_embeddings: 512
