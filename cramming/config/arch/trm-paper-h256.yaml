@@ -12,8 +12,8 @@ num_attention_heads: 8
 num_hidden_layers: 2
 
 # TRM recursion schedule from the paper recipe.
-H_cycles: 3
-L_cycles: 6
+H_cycles: 2
+L_cycles: 3
 
 # Paper-style max recursive supervision depth. Sweep this lower when testing
 # cost/quality tradeoffs.
