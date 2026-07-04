@@ -19,6 +19,7 @@ set -euo pipefail
 #   PRETRAIN_DS_STEPS="1 2 4 8 16" FINETUNE_DS_STEPS="1 2 4" bash scripts/trm_deep_supervision_sweep.sh print-eval
 #   PREFIX=my_trm BUDGET=24 TRAIN_MBS=32 TRAIN_BATCH=32 bash scripts/trm_deep_supervision_sweep.sh pretrain
 #   INFERENCE_STEPS=16 bash scripts/trm_deep_supervision_sweep.sh eval
+#   TRAIN_GRAD_CLIP=null bash scripts/trm_deep_supervision_sweep.sh pretrain
 #
 # Note: paper TRM uses 8 heads at hidden_size=512. This h256 config keeps
 # 8 heads and uses head_dim=32.
@@ -33,6 +34,7 @@ TRAIN_CFG="${TRAIN_CFG:-rr-me-onecycle}"
 ARCH_CFG="${ARCH_CFG:-trm-paper-h256}"
 TRAIN_MBS="${TRAIN_MBS:-16}"
 TRAIN_BATCH="${TRAIN_BATCH:-$TRAIN_MBS}"
+TRAIN_GRAD_CLIP="${TRAIN_GRAD_CLIP:-1.0}"
 EVAL_MBS="${EVAL_MBS:-8}"
 EVAL_CFG="${EVAL_CFG:-GLUE_sane}"
 EVAL_EPOCHS="${EVAL_EPOCHS:-4}"
@@ -96,6 +98,7 @@ pretrain_cmd() {
     arch="$ARCH_CFG" \
     budget="$BUDGET" \
     train.batch_size="$TRAIN_BATCH" \
+    train.gradient_clipping="$TRAIN_GRAD_CLIP" \
     dryrun="$DRYRUN" \
     impl.microbatch_size="$TRAIN_MBS" \
     impl.compile_torch="$COMPILE_TORCH" \
@@ -135,10 +138,10 @@ eval_cmd() {
     impl.microbatch_size="$EVAL_MBS" \
     impl.shuffle_in_dataloader=True \
     impl.compile_torch=False \
-    eval.arch_modifications.deep_supervision_steps="$ft_ds" \
-    eval.arch_modifications.inference_steps="$eval_steps" \
-    eval.arch_modifications.halt_max_steps="$ft_ds" \
-    eval.arch_modifications.act_training=False \
+    +eval.arch_modifications.deep_supervision_steps="$ft_ds" \
+    +eval.arch_modifications.inference_steps="$eval_steps" \
+    +eval.arch_modifications.halt_max_steps="$ft_ds" \
+    +eval.arch_modifications.act_training=False \
     "wandb.tags=[trm,h256,deep-supervision,glue,ptds${pt_ds},ftds${ft_ds},infs${eval_steps}]" \
     "$@"
 }

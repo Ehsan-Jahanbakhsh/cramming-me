@@ -6,6 +6,7 @@ set -euo pipefail
 # Print commands without running: RUN=echo DRYRUN=True bash scripts/trm_refinement_ablatio_4gpu.sh
 # Skip eval after pretraining: DO_EVAL=False bash scripts/trm_refinement_ablatio_4gpu.sh
 # DRYRUN=True without RUN=echo skips eval by default because eval still loads checkpoints.
+# Disable clipping with TRAIN_GRAD_CLIP=null, or tune with TRAIN_GRAD_CLIP=0.5.
 # On Windows, if plain bash opens WSL, call your Git/MinGW bash executable directly.
 
 RUN="${RUN:-}"
@@ -27,6 +28,7 @@ HALT_LOSS="${HALT_LOSS:-0.0}"
 HALT_EXPLORATION_PROB="${HALT_EXPLORATION_PROB:-0.0}"
 TRAIN_MBS="${TRAIN_MBS:-256}"
 TRAIN_BATCH="${TRAIN_BATCH:-2048}"
+TRAIN_GRAD_CLIP="${TRAIN_GRAD_CLIP:-1.0}"
 EVAL_MBS="${EVAL_MBS:-16}"
 EVAL_CFG="${EVAL_CFG:-GLUE_sane}"
 EVAL_EPOCHS="${EVAL_EPOCHS:-4}"
@@ -45,7 +47,7 @@ GPU0="${GPU0:-0}"
 GPU1="${GPU1:-1}"
 GPU2="${GPU2:-2}"
 GPU3="${GPU3:-3}"
-PRETRAIN_EXTRA="${PRETRAIN_EXTRA:-}"
+PRETRAIN_EXTRA="train.gradient_clipping=$TRAIN_GRAD_CLIP ${PRETRAIN_EXTRA:-}"
 EVAL_EXTRA="${EVAL_EXTRA:-}"
 
 wait_wave() {
