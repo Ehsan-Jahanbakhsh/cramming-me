@@ -5,6 +5,7 @@ set -euo pipefail
 # Usage: bash scripts/trm_refinement_ablatio_4gpu.sh
 # Print commands without running: RUN=echo DRYRUN=True bash scripts/trm_refinement_ablatio_4gpu.sh
 # Skip eval after pretraining: DO_EVAL=False bash scripts/trm_refinement_ablatio_4gpu.sh
+# DRYRUN=True without RUN=echo skips eval by default because eval still loads checkpoints.
 # On Windows, if plain bash opens WSL, call your Git/MinGW bash executable directly.
 
 RUN="${RUN:-}"
@@ -33,7 +34,13 @@ EVAL_BATCH="${EVAL_BATCH:-16}"
 EVAL_LR="${EVAL_LR:-8e-5}"
 COMPILE_TORCH="${COMPILE_TORCH:-True}"
 DRYRUN="${DRYRUN:-False}"
-DO_EVAL="${DO_EVAL:-True}"
+if [[ -z "${DO_EVAL+x}" ]]; then
+  if [[ -z "$RUN" && ( "$DRYRUN" == "True" || "$DRYRUN" == "true" || "$DRYRUN" == "1" ) ]]; then
+    DO_EVAL="False"
+  else
+    DO_EVAL="True"
+  fi
+fi
 GPU0="${GPU0:-0}"
 GPU1="${GPU1:-1}"
 GPU2="${GPU2:-2}"
@@ -90,28 +97,28 @@ if [[ "$DO_EVAL" == "True" || "$DO_EVAL" == "true" || "$DO_EVAL" == "1" ]]; then
   $RUN env CUDA_VISIBLE_DEVICES="$GPU0" python eval.py name="${PREFIX}_rr_h2_l${LO}_b${BUDGET}" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False "wandb.tags=[rr-single-high,eval,tiny8x,budget${BUDGET},4gpu]" $EVAL_EXTRA &
   p0=$!
   # GPU1: Eval TRM single-step full-gradient control.
-  $RUN env CUDA_VISIBLE_DEVICES="$GPU1" python eval.py name="${PREFIX}_trm_h2_l${LO}_ds1_gradfull" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False eval.arch_modifications.deep_supervision_steps=1 eval.arch_modifications.inference_steps=1 eval.arch_modifications.halt_max_steps=1 eval.arch_modifications.grad_last_cycle_only=False eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,baseline,gradfull,budget${BUDGET},4gpu]" $EVAL_EXTRA &
+  $RUN env CUDA_VISIBLE_DEVICES="$GPU1" python eval.py name="${PREFIX}_trm_h2_l${LO}_ds1_gradfull" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False +eval.arch_modifications.deep_supervision_steps=1 +eval.arch_modifications.inference_steps=1 +eval.arch_modifications.halt_max_steps=1 +eval.arch_modifications.grad_last_cycle_only=False +eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,baseline,gradfull,budget${BUDGET},4gpu]" $EVAL_EXTRA &
   p1=$!
   # GPU2: Eval TRM single-step last-cycle-only control.
-  $RUN env CUDA_VISIBLE_DEVICES="$GPU2" python eval.py name="${PREFIX}_trm_h2_l${LO}_ds1_gradlast" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False eval.arch_modifications.deep_supervision_steps=1 eval.arch_modifications.inference_steps=1 eval.arch_modifications.halt_max_steps=1 eval.arch_modifications.grad_last_cycle_only=True eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,baseline,gradlast,budget${BUDGET},4gpu]" $EVAL_EXTRA &
+  $RUN env CUDA_VISIBLE_DEVICES="$GPU2" python eval.py name="${PREFIX}_trm_h2_l${LO}_ds1_gradlast" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False +eval.arch_modifications.deep_supervision_steps=1 +eval.arch_modifications.inference_steps=1 +eval.arch_modifications.halt_max_steps=1 +eval.arch_modifications.grad_last_cycle_only=True +eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,baseline,gradlast,budget${BUDGET},4gpu]" $EVAL_EXTRA &
   p2=$!
   # GPU3: Eval TRM carried refinement with full gradients.
-  $RUN env CUDA_VISIBLE_DEVICES="$GPU3" python eval.py name="${PREFIX}_trm_h2_l${LO}_ds2_gradfull" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False eval.arch_modifications.deep_supervision_steps=2 eval.arch_modifications.inference_steps=2 eval.arch_modifications.halt_max_steps=2 eval.arch_modifications.grad_last_cycle_only=False eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,deep2,gradfull,budget${BUDGET},4gpu]" $EVAL_EXTRA &
+  $RUN env CUDA_VISIBLE_DEVICES="$GPU3" python eval.py name="${PREFIX}_trm_h2_l${LO}_ds2_gradfull" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False +eval.arch_modifications.deep_supervision_steps=2 +eval.arch_modifications.inference_steps=2 +eval.arch_modifications.halt_max_steps=2 +eval.arch_modifications.grad_last_cycle_only=False +eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,deep2,gradfull,budget${BUDGET},4gpu]" $EVAL_EXTRA &
   p3=$!
   wait_wave "eval wave 1"
 
   echo "Eval wave 2: GPUs ${GPU0},${GPU1},${GPU2},${GPU3}"
   # GPU0: Eval TRM carried refinement with last-cycle-only gradients.
-  $RUN env CUDA_VISIBLE_DEVICES="$GPU0" python eval.py name="${PREFIX}_trm_h2_l${LO}_ds2_gradlast" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False eval.arch_modifications.deep_supervision_steps=2 eval.arch_modifications.inference_steps=2 eval.arch_modifications.halt_max_steps=2 eval.arch_modifications.grad_last_cycle_only=True eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,deep2,gradlast,budget${BUDGET},4gpu]" $EVAL_EXTRA &
+  $RUN env CUDA_VISIBLE_DEVICES="$GPU0" python eval.py name="${PREFIX}_trm_h2_l${LO}_ds2_gradlast" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False +eval.arch_modifications.deep_supervision_steps=2 +eval.arch_modifications.inference_steps=2 +eval.arch_modifications.halt_max_steps=2 +eval.arch_modifications.grad_last_cycle_only=True +eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,deep2,gradlast,budget${BUDGET},4gpu]" $EVAL_EXTRA &
   p0=$!
   # GPU1: Eval inner-depth alternative.
-  $RUN env CUDA_VISIBLE_DEVICES="$GPU1" python eval.py name="${PREFIX}_trm_h4_l${LO}_ds1_gradlast" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False eval.arch_modifications.deep_supervision_steps=1 eval.arch_modifications.inference_steps=1 eval.arch_modifications.halt_max_steps=1 eval.arch_modifications.grad_last_cycle_only=True eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,inner-depth,gradlast,budget${BUDGET},4gpu]" $EVAL_EXTRA &
+  $RUN env CUDA_VISIBLE_DEVICES="$GPU1" python eval.py name="${PREFIX}_trm_h4_l${LO}_ds1_gradlast" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False +eval.arch_modifications.deep_supervision_steps=1 +eval.arch_modifications.inference_steps=1 +eval.arch_modifications.halt_max_steps=1 +eval.arch_modifications.grad_last_cycle_only=True +eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,inner-depth,gradlast,budget${BUDGET},4gpu]" $EVAL_EXTRA &
   p1=$!
   # GPU2: Eval outer-depth alternative.
-  $RUN env CUDA_VISIBLE_DEVICES="$GPU2" python eval.py name="${PREFIX}_trm_h1_l${LO}_ds4_gradlast" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False eval.arch_modifications.deep_supervision_steps=4 eval.arch_modifications.inference_steps=4 eval.arch_modifications.halt_max_steps=4 eval.arch_modifications.grad_last_cycle_only=True eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,outer-depth,gradlast,budget${BUDGET},4gpu]" $EVAL_EXTRA &
+  $RUN env CUDA_VISIBLE_DEVICES="$GPU2" python eval.py name="${PREFIX}_trm_h1_l${LO}_ds4_gradlast" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False +eval.arch_modifications.deep_supervision_steps=4 +eval.arch_modifications.inference_steps=4 +eval.arch_modifications.halt_max_steps=4 +eval.arch_modifications.grad_last_cycle_only=True +eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,outer-depth,gradlast,budget${BUDGET},4gpu]" $EVAL_EXTRA &
   p2=$!
   # GPU3: Eval memory-stretch probe.
-  $RUN env CUDA_VISIBLE_DEVICES="$GPU3" python eval.py name="${PREFIX}_trm_h6_l${LO}_ds1_gradlast" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False eval.arch_modifications.deep_supervision_steps=1 eval.arch_modifications.inference_steps=1 eval.arch_modifications.halt_max_steps=1 eval.arch_modifications.grad_last_cycle_only=True eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,memory-stretch,gradlast,budget${BUDGET},4gpu]" $EVAL_EXTRA &
+  $RUN env CUDA_VISIBLE_DEVICES="$GPU3" python eval.py name="${PREFIX}_trm_h6_l${LO}_ds1_gradlast" seed="$SEED" eval="$EVAL_CFG" eval.checkpoint=latest eval.epochs="$EVAL_EPOCHS" eval.batch_size="$EVAL_BATCH" eval.optim.lr="$EVAL_LR" dryrun="$DRYRUN" impl.microbatch_size="$EVAL_MBS" impl.shuffle_in_dataloader=True impl.compile_torch=False +eval.arch_modifications.deep_supervision_steps=1 +eval.arch_modifications.inference_steps=1 +eval.arch_modifications.halt_max_steps=1 +eval.arch_modifications.grad_last_cycle_only=True +eval.arch_modifications.q_halt_loss_weight="$HALT_LOSS" "wandb.tags=[trm-refine,eval,memory-stretch,gradlast,budget${BUDGET},4gpu]" $EVAL_EXTRA &
   p3=$!
   wait_wave "eval wave 2"
 fi
