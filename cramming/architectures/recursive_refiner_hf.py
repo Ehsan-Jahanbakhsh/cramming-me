@@ -345,6 +345,7 @@ class RecursiveRefinerConfig(PretrainedConfig):
         expansion: float = 4.0,
         hi_cycles: int = 3,
         lo_cycles: int = 2,
+        grad_last_cycle_only: bool = False,
         embed_factor: int = 4,
         pre_norm: bool = True,
         rope_theta: float = 10000.0,
@@ -375,6 +376,7 @@ class RecursiveRefinerConfig(PretrainedConfig):
         self.expansion = float(expansion)
         self.hi_cycles = int(hi_cycles)
         self.lo_cycles = int(lo_cycles)
+        self.grad_last_cycle_only = bool(grad_last_cycle_only)
         self.embed_factor = int(embed_factor)
         self.pre_norm = bool(pre_norm)
         self.rope_theta = float(rope_theta)
@@ -495,7 +497,15 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
         hi_cycles = int(max(1, self.config.hi_cycles))
         lo_cycles = int(max(1, self.config.lo_cycles))
 
-        for _ in range(hi_cycles):
+        if self.config.grad_last_cycle_only:
+            with torch.no_grad():
+                for _ in range(hi_cycles - 1):
+                    for _ in range(lo_cycles):
+                        z_lo = self.shared(z_lo, inject=(z_hi + x), attention_mask=attention_mask)
+                    z_hi = self.shared(z_hi, inject=z_lo, attention_mask=attention_mask)
+
+        grad_cycles = 1 if self.config.grad_last_cycle_only else hi_cycles
+        for _ in range(grad_cycles):
             for _ in range(lo_cycles):
                 z_lo = self.shared(z_lo, inject=(z_hi + x), attention_mask=attention_mask)
             z_hi = self.shared(z_hi, inject=z_lo, attention_mask=attention_mask)
