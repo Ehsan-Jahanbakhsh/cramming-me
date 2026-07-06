@@ -43,6 +43,17 @@ def main_downstream_process(cfg, setup):
         # Launch training
         model_engine.train(cfg.eval.eval_in_train_mode)
         loss_vals = []
+        epoch_selection = cfg.eval.get("epoch_selection", "last")
+        selection_mode = cfg.eval.get("selection_mode", "max")
+        if epoch_selection not in ["last", "best"]:
+            raise ValueError(f"Invalid eval.epoch_selection={epoch_selection}. Choose 'last' or 'best'.")
+        if epoch_selection == "best" and cfg.eval.evaluation_set == "test":
+            log.warning("eval.epoch_selection=best is selecting on the test split. Use a validation split for paper comparisons.")
+
+        best_score = None
+        best_epoch = None
+        best_metrics = None
+        best_model_state = None
         for epoch in range(cfg.eval.epochs):
             train_time = time.time()
 
@@ -55,10 +66,12 @@ def main_downstream_process(cfg, setup):
                     break
 
             metrics[task_name] = validate(model_engine, task["validloader"], metric, setup, cfg)
+            selection_score = _selection_score(metrics[task_name], task, cfg) if epoch_selection == "best" else float("nan")
             stats[f"{task_name}_epoch"] += [epoch]
             stats[f"{task_name}_loss"] += [loss.item()]
 
             stats[f"{task_name}_avg_loss"] += [torch.stack(loss_vals).mean().item()]  # Smoothed loss
+            stats[f"{task_name}_selection_score"] += [selection_score]
             loss_vals = []
             current_lr = model_engine.optimizer.param_groups[0]["lr"]
 
@@ -75,6 +88,12 @@ def main_downstream_process(cfg, setup):
 
             for name, metric_val in metrics[task_name].items():
                 stats[f"{task_name}_{name}"] += [metric_val]
+            if epoch_selection == "best" and _is_better(selection_score, best_score, selection_mode):
+                best_score = selection_score
+                best_epoch = epoch
+                best_metrics = dict(metrics[task_name])
+                best_model_state = _copy_model_state_to_cpu(model_engine)
+                log_msg += f" New best {selection_score:2.4f}."
             log.info(log_msg)
             msg_metrics = " ".join([f"{k}: {v:2.4f}" for k, v in metrics[task_name].items()])
             log.info(f"Validation metric is {msg_metrics} after epoch {epoch}.")
@@ -82,6 +101,15 @@ def main_downstream_process(cfg, setup):
 
             if cfg.dryrun:
                 break
+        if epoch_selection == "best":
+            metrics[task_name] = best_metrics
+            _restore_model_state(model_engine, best_model_state)
+            stats[f"{task_name}_selected_epoch"] += [best_epoch]
+            stats[f"{task_name}_selected_score"] += [best_score]
+            for name, metric_val in best_metrics.items():
+                stats[f"{task_name}_selected_{name}"] += [metric_val]
+            log.info(f"Selected epoch {best_epoch} for task {task_name} with validation score {best_score:2.4f}.")
+            cramming.utils.wandb_log({k: v for k, v in stats.items() if k.startswith(f"{task_name}_selected_")}, cfg)
         # Launch extra testing if extra validation set exists (as with MNLI-mismatched):
         if task["extra_validloader"] is not None:
             extra_eval_metric = validate(model_engine, task["extra_validloader"], metric, setup, cfg)
@@ -138,6 +166,40 @@ def validate(model_engine, validloader, metric, setup, cfg):
         eval_metric = metric.compute(predictions=[0, 1], references=[1, 0])  # spoof terrible result if metric computation fails
     model_engine.train(cfg.eval.eval_in_train_mode)
     return {k: float(v) for k, v in eval_metric.items()}  # force float returns
+
+
+def _selection_score(metrics, task, cfg):
+    """Compute the scalar used to select the downstream fine-tuning epoch."""
+    selection_metric = cfg.eval.get("selection_metric", "target")
+    if selection_metric == "target":
+        metric_names = [name for name in task["details"]["target_metrics"] if name in metrics]
+        if len(metric_names) == 0:
+            metric_names = list(metrics.keys())
+    else:
+        if selection_metric not in metrics:
+            raise ValueError(f"eval.selection_metric={selection_metric} not found in validation metrics {list(metrics)}.")
+        metric_names = [selection_metric]
+    return torch.as_tensor([metrics[name] for name in metric_names]).float().mean().item()
+
+
+def _is_better(score, best_score, mode):
+    if mode == "max":
+        return best_score is None or score > best_score
+    if mode == "min":
+        return best_score is None or score < best_score
+    raise ValueError(f"Invalid eval.selection_mode={mode}. Choose 'max' or 'min'.")
+
+
+def _copy_model_state_to_cpu(model_engine):
+    model = getattr(model_engine, "model", model_engine)
+    return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+
+
+def _restore_model_state(model_engine, state_dict):
+    model = getattr(model_engine, "model", model_engine)
+    model.load_state_dict(state_dict)
+    if hasattr(model_engine, "setup"):
+        model.to(**model_engine.setup)
 
 
 @hydra.main(config_path="cramming/config", config_name="cfg_eval", version_base="1.1")

@@ -37,6 +37,9 @@ optim_mod:
 eval_in_train_mode: True # Turn on dropout (if existing in the model) during finetuning
 
 epochs: 10 # all superGLUE tasks are short
+epoch_selection: best # "best" reports the best validation epoch; "last" reports the final epoch
+selection_metric: target # "target" uses the task's target_metrics; or set a metric name such as accuracy
+selection_mode: max
 
 # These options are only used for scheduling:
 warmup_steps: 0.1
