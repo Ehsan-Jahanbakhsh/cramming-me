@@ -21,6 +21,15 @@ lo_cycles: 3
 # If true, run all but the last high cycle under torch.no_grad(), TRM-style.
 grad_last_cycle_only: false
 
+# Optional H-cycle convergence halting. A threshold <= 0 disables halting.
+halt_on_train: false
+halt_on_eval: false
+halt_min_cycles: 1
+halt_threshold: 0.0
+halt_per_sample: true # Compact halted samples out of later H cycles instead of reducing over the whole batch.
+halt_batch_reduction: max # Used only when halt_per_sample=false.
+halt_epsilon: 1e-6
+
 # Factorized embedding rank: rank = hidden_size / embed_factor.
 embed_factor: 1
 

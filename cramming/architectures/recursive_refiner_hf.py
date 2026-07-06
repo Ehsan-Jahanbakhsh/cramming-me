@@ -346,6 +346,13 @@ class RecursiveRefinerConfig(PretrainedConfig):
         hi_cycles: int = 3,
         lo_cycles: int = 2,
         grad_last_cycle_only: bool = False,
+        halt_on_train: bool = False,
+        halt_on_eval: bool = False,
+        halt_min_cycles: int = 1,
+        halt_threshold: float = 0.0,
+        halt_per_sample: bool = True,
+        halt_batch_reduction: str = "max",
+        halt_epsilon: float = 1e-6,
         embed_factor: int = 4,
         pre_norm: bool = True,
         rope_theta: float = 10000.0,
@@ -377,6 +384,15 @@ class RecursiveRefinerConfig(PretrainedConfig):
         self.hi_cycles = int(hi_cycles)
         self.lo_cycles = int(lo_cycles)
         self.grad_last_cycle_only = bool(grad_last_cycle_only)
+        self.halt_on_train = bool(halt_on_train)
+        self.halt_on_eval = bool(halt_on_eval)
+        self.halt_min_cycles = int(max(1, halt_min_cycles))
+        self.halt_threshold = float(halt_threshold)
+        self.halt_per_sample = bool(halt_per_sample)
+        self.halt_batch_reduction = str(halt_batch_reduction)
+        if self.halt_batch_reduction not in ("max", "mean"):
+            raise ValueError("halt_batch_reduction must be 'max' or 'mean'.")
+        self.halt_epsilon = float(halt_epsilon)
         self.embed_factor = int(embed_factor)
         self.pre_norm = bool(pre_norm)
         self.rope_theta = float(rope_theta)
@@ -456,6 +472,111 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
         z_lo = self.lo_init.to(device=device, dtype=dtype).view(1, 1, -1).expand(batch_size, total_len, -1).contiguous()
         return z_hi, z_lo
 
+    def _halt_enabled(self, use_training_halt: Optional[bool]) -> bool:
+        if self.config.halt_threshold <= 0:
+            return False
+        if use_training_halt is None:
+            use_training_halt = torch.is_grad_enabled()
+        return self.config.halt_on_train if use_training_halt else self.config.halt_on_eval
+
+    def _refine_h_cycle(
+        self,
+        z_hi: torch.Tensor,
+        z_lo: torch.Tensor,
+        input_embeddings: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        lo_cycles: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        for _ in range(lo_cycles):
+            z_lo = self.shared(z_lo, inject=(z_hi + input_embeddings), attention_mask=attention_mask)
+        z_hi = self.shared(z_hi, inject=z_lo, attention_mask=attention_mask)
+        return z_hi, z_lo
+
+    def _relative_h_delta(
+        self,
+        prev_z_hi: torch.Tensor,
+        z_hi: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        diff = z_hi - prev_z_hi
+        if attention_mask is not None:
+            mask = attention_mask.to(device=z_hi.device, dtype=z_hi.dtype).unsqueeze(-1)
+            diff_sq = diff.pow(2).mul(mask).sum(dim=(1, 2))
+            state_sq = z_hi.pow(2).mul(mask).sum(dim=(1, 2))
+        else:
+            diff_sq = diff.pow(2).sum(dim=(1, 2))
+            state_sq = z_hi.pow(2).sum(dim=(1, 2))
+
+        eps = max(float(self.config.halt_epsilon), torch.finfo(z_hi.dtype).eps)
+        return (diff_sq / state_sq.clamp_min(eps)).sqrt()
+
+    def _refine_active_h_cycle(
+        self,
+        z_hi: torch.Tensor,
+        z_lo: torch.Tensor,
+        input_embeddings: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        lo_cycles: int,
+        active_mask: Optional[torch.Tensor],
+        compute_delta: bool,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        if active_mask is None:
+            prev_z_hi = z_hi if compute_delta else None
+            z_hi, z_lo = self._refine_h_cycle(z_hi, z_lo, input_embeddings, attention_mask, lo_cycles)
+            h_delta = self._relative_h_delta(prev_z_hi, z_hi, attention_mask) if compute_delta else None
+            return z_hi, z_lo, h_delta, None
+
+        active_indices = active_mask.nonzero(as_tuple=False).flatten()
+        if active_indices.numel() == 0:
+            return z_hi, z_lo, None, active_indices
+
+        active_z_hi = z_hi.index_select(0, active_indices)
+        active_z_lo = z_lo.index_select(0, active_indices)
+        active_input = input_embeddings.index_select(0, active_indices)
+        active_attention_mask = attention_mask.index_select(0, active_indices) if attention_mask is not None else None
+
+        new_active_z_hi, new_active_z_lo = self._refine_h_cycle(
+            active_z_hi,
+            active_z_lo,
+            active_input,
+            active_attention_mask,
+            lo_cycles,
+        )
+        h_delta = self._relative_h_delta(active_z_hi, new_active_z_hi, active_attention_mask) if compute_delta else None
+
+        z_hi = z_hi.index_copy(0, active_indices, new_active_z_hi)
+        z_lo = z_lo.index_copy(0, active_indices, new_active_z_lo)
+        return z_hi, z_lo, h_delta, active_indices
+
+    def _should_halt(self, h_delta: torch.Tensor) -> bool:
+        if self.config.halt_batch_reduction == "mean":
+            halt_value = h_delta.mean()
+        else:
+            halt_value = h_delta.max()
+        return bool((halt_value <= self.config.halt_threshold).detach().item())
+
+    def _halted_samples(self, h_delta: torch.Tensor) -> torch.Tensor:
+        return (h_delta <= self.config.halt_threshold).detach()
+
+    def _any_active(self, active_mask: Optional[torch.Tensor]) -> bool:
+        return active_mask is None or bool(active_mask.any().detach().item())
+
+    def _update_active_mask(
+        self,
+        active_mask: Optional[torch.Tensor],
+        active_indices: Optional[torch.Tensor],
+        h_delta: Optional[torch.Tensor],
+    ) -> Tuple[Optional[torch.Tensor], bool]:
+        if h_delta is None:
+            return active_mask, True
+        if active_mask is None:
+            return active_mask, self._should_halt(h_delta)
+
+        halted_now = self._halted_samples(h_delta)
+        if bool(halted_now.any().detach().item()):
+            active_mask = active_mask.clone()
+            active_mask[active_indices[halted_now]] = False
+        return active_mask, not self._any_active(active_mask)
 
     def get_input_embeddings(self) -> nn.Module:
         return self.embed
@@ -470,10 +591,12 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
+        use_training_halt: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> Union[BaseModelOutput, Tuple[torch.Tensor]]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else False
 
         if input_ids.dim() != 2:
             raise ValueError(f"input_ids must be [B, L], got {tuple(input_ids.shape)}")
@@ -496,26 +619,76 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
 
         hi_cycles = int(max(1, self.config.hi_cycles))
         lo_cycles = int(max(1, self.config.lo_cycles))
+        halt_enabled = self._halt_enabled(use_training_halt)
+        halt_min_cycles = int(max(1, self.config.halt_min_cycles))
+        halt_per_sample = bool(halt_enabled and self.config.halt_per_sample)
+        active_mask = torch.ones(b, device=x.device, dtype=torch.bool) if halt_per_sample else None
+        hidden_history = [] if output_hidden_states else None
+        completed_hi_cycles = 0
+        batch_halted = False
 
-        if self.config.grad_last_cycle_only:
+        grad_last_cycle_only = bool(self.config.grad_last_cycle_only and (use_training_halt if use_training_halt is not None else torch.is_grad_enabled()))
+        if grad_last_cycle_only:
             with torch.no_grad():
                 for _ in range(hi_cycles - 1):
-                    for _ in range(lo_cycles):
-                        z_lo = self.shared(z_lo, inject=(z_hi + x), attention_mask=attention_mask)
-                    z_hi = self.shared(z_hi, inject=z_lo, attention_mask=attention_mask)
+                    if batch_halted or not self._any_active(active_mask):
+                        break
+                    z_hi, z_lo, h_delta, active_indices = self._refine_active_h_cycle(
+                        z_hi,
+                        z_lo,
+                        x,
+                        attention_mask,
+                        lo_cycles,
+                        active_mask,
+                        halt_enabled and completed_hi_cycles + 1 >= halt_min_cycles,
+                    )
+                    completed_hi_cycles += 1
+                    if hidden_history is not None:
+                        hidden_history.append(z_hi[:, self.config.prefix_len :])
+                    if halt_enabled and completed_hi_cycles >= halt_min_cycles:
+                        active_mask, batch_halted = self._update_active_mask(active_mask, active_indices, h_delta)
+                    if batch_halted:
+                        break
 
-        grad_cycles = 1 if self.config.grad_last_cycle_only else hi_cycles
+        grad_cycles = 1 if grad_last_cycle_only else hi_cycles
         for _ in range(grad_cycles):
-            for _ in range(lo_cycles):
-                z_lo = self.shared(z_lo, inject=(z_hi + x), attention_mask=attention_mask)
-            z_hi = self.shared(z_hi, inject=z_lo, attention_mask=attention_mask)
+            if batch_halted and not grad_last_cycle_only:
+                break
+            if not grad_last_cycle_only and not self._any_active(active_mask):
+                break
+
+            # With last-cycle-only gradients, always run one final full-batch
+            # differentiable cycle so every sample contributes to the loss.
+            cycle_active_mask = None if grad_last_cycle_only else active_mask
+            z_hi, z_lo, h_delta, active_indices = self._refine_active_h_cycle(
+                z_hi,
+                z_lo,
+                x,
+                attention_mask,
+                lo_cycles,
+                cycle_active_mask,
+                halt_enabled and completed_hi_cycles + 1 >= halt_min_cycles,
+            )
+            completed_hi_cycles += 1
+            if hidden_history is not None:
+                hidden_history.append(z_hi[:, self.config.prefix_len :])
+            if grad_last_cycle_only:
+                continue
+            if halt_enabled and completed_hi_cycles >= halt_min_cycles:
+                active_mask, batch_halted = self._update_active_mask(active_mask, active_indices, h_delta)
+            if batch_halted:
+                break
 
         z_final = z_hi
         z_out = z_final[:, self.config.prefix_len:]  # [B, L, D] (prefix removed)
 
         if not return_dict:
             return (z_out,)
-        return BaseModelOutput(last_hidden_state=z_out, hidden_states=None, attentions=None)
+        return BaseModelOutput(
+            last_hidden_state=z_out,
+            hidden_states=tuple(hidden_history) if hidden_history is not None else None,
+            attentions=None,
+        )
 
 
 class RecursiveRefinerForMaskedLM(RecursiveRefinerPreTrainedModel):
@@ -549,6 +722,7 @@ class RecursiveRefinerForMaskedLM(RecursiveRefinerPreTrainedModel):
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=output_hidden_states,
+            use_training_halt=labels is not None and torch.is_grad_enabled(),
             return_dict=True,
         )
         z_out = outputs.last_hidden_state
@@ -570,7 +744,7 @@ class RecursiveRefinerForMaskedLM(RecursiveRefinerPreTrainedModel):
         return MaskedLMOutput(
             loss=loss,
             logits=logits,
-            hidden_states=None,
+            hidden_states=outputs.hidden_states,
             attentions=None,
         )
 
@@ -613,6 +787,7 @@ class RecursiveRefinerForCausalLM(RecursiveRefinerPreTrainedModel):
         outputs = self.recursive_refiner(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            use_training_halt=labels is not None and torch.is_grad_enabled(),
             return_dict=True,
         )
         z_out = outputs.last_hidden_state
@@ -640,7 +815,7 @@ class RecursiveRefinerForCausalLM(RecursiveRefinerPreTrainedModel):
             loss=loss,
             logits=logits,
             past_key_values=None,
-            hidden_states=None,
+            hidden_states=outputs.hidden_states,
             attentions=None,
         )
 
@@ -685,6 +860,7 @@ class RecursiveRefinerForSequenceClassification(RecursiveRefinerPreTrainedModel)
         outputs = self.recursive_refiner(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            use_training_halt=labels is not None and torch.is_grad_enabled(),
             return_dict=True,
         )
         z_out = outputs.last_hidden_state  # [B, L, D]
@@ -732,6 +908,6 @@ class RecursiveRefinerForSequenceClassification(RecursiveRefinerPreTrainedModel)
         return SequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            hidden_states=None,
+            hidden_states=outputs.hidden_states,
             attentions=None,
         )

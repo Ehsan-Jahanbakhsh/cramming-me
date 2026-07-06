@@ -55,3 +55,7 @@ arch_modifications:
     # head_dim: ${arch.hidden_size}
     nonlin: Tanh
     # classifier_dropout: ${arch.hidden_dropout_prob}
+
+# Applied only inside validate(); useful for inference-time recursion probes
+# without changing the downstream fine-tuning depth.
+inference_arch_modifications: {}

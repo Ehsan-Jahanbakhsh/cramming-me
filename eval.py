@@ -7,10 +7,12 @@ import hydra
 import time
 import datetime
 import logging
+from contextlib import contextmanager
 from collections import defaultdict
 
 import cramming
 import evaluate
+from omegaconf import OmegaConf, open_dict
 
 
 log = logging.getLogger(__name__)
@@ -22,6 +24,10 @@ def main_downstream_process(cfg, setup):
 
     tokenizer, cfg_arch, model_file = cramming.utils.find_pretrained_checkpoint(cfg)
     tasks = cramming.prepare_task_dataloaders(tokenizer, cfg.eval, cfg.impl)
+    if _has_inference_arch_modifications(cfg) and cfg.impl.compile_torch:
+        log.warning("Disabling torch.compile because eval.inference_arch_modifications mutates model config during validation.")
+        with open_dict(cfg):
+            cfg.impl.compile_torch = False
 
     metrics = dict()
     stats = defaultdict(list)
@@ -145,19 +151,21 @@ def main_downstream_process(cfg, setup):
 def validate(model_engine, validloader, metric, setup, cfg):
     """Evaluate on validation set."""
     model_engine.eval()
-    for step, batch in enumerate(validloader):
-        device_batch = model_engine.to_device(batch, keys=["input_ids", "labels", "attention_mask"])
-        _, predictions = model_engine.forward_inference(**device_batch)
+    inference_arch_modifications = cfg.eval.get("inference_arch_modifications", None)
+    with temporary_arch_modifications(model_engine, inference_arch_modifications):
+        for step, batch in enumerate(validloader):
+            device_batch = model_engine.to_device(batch, keys=["input_ids", "labels", "attention_mask"])
+            _, predictions = model_engine.forward_inference(**device_batch)
 
-        if getattr(metric, "config_name", "") != "multirc":
-            metric.add_batch(predictions=predictions, references=device_batch["labels"])
-        else:  # uuuuuughhhhh, whhyyy multirc
-            pred_indices = range(step * predictions.shape[0], (step + 1) * predictions.shape[0])
-            packages = [dict(idx=validloader.index_lookup[pred_indices[i]], prediction=p) for i, p in enumerate(predictions.cpu())]
-            metric.add_batch(predictions=packages, references=batch["labels"])
+            if getattr(metric, "config_name", "") != "multirc":
+                metric.add_batch(predictions=predictions, references=device_batch["labels"])
+            else:  # uuuuuughhhhh, whhyyy multirc
+                pred_indices = range(step * predictions.shape[0], (step + 1) * predictions.shape[0])
+                packages = [dict(idx=validloader.index_lookup[pred_indices[i]], prediction=p) for i, p in enumerate(predictions.cpu())]
+                metric.add_batch(predictions=packages, references=batch["labels"])
 
-        if cfg.dryrun and step > 1:
-            break
+            if cfg.dryrun and step > 1:
+                break
 
     try:
         eval_metric = metric.compute()
@@ -166,6 +174,69 @@ def validate(model_engine, validloader, metric, setup, cfg):
         eval_metric = metric.compute(predictions=[0, 1], references=[1, 0])  # spoof terrible result if metric computation fails
     model_engine.train(cfg.eval.eval_in_train_mode)
     return {k: float(v) for k, v in eval_metric.items()}  # force float returns
+
+
+@contextmanager
+def temporary_arch_modifications(model_engine, modifications):
+    """Temporarily override model config values for validation-only probes."""
+    if modifications is None:
+        yield
+        return
+
+    modifications = OmegaConf.to_container(modifications, resolve=True)
+    if len(modifications) == 0:
+        yield
+        return
+
+    configs = _collect_model_configs(model_engine)
+    originals = []
+    try:
+        for config in configs:
+            for key, value in modifications.items():
+                originals.append((config, key, getattr(config, key, None), hasattr(config, key)))
+                setattr(config, key, value)
+        yield
+    finally:
+        for config, key, old_value, existed in reversed(originals):
+            if existed:
+                setattr(config, key, old_value)
+            else:
+                delattr(config, key)
+
+
+def _collect_model_configs(model_engine):
+    model = getattr(model_engine, "model", model_engine)
+    seen = set()
+    configs = []
+    for module in _iter_unwrapped_modules(model):
+        config = getattr(module, "config", None)
+        if config is not None and id(config) not in seen:
+            configs.append(config)
+            seen.add(id(config))
+    return configs
+
+
+def _iter_unwrapped_modules(model):
+    stack = [model]
+    seen = set()
+    while stack:
+        module = stack.pop()
+        if id(module) in seen:
+            continue
+        seen.add(id(module))
+        yield module
+        for attr in ("module", "_orig_mod", "recursive_refiner", "trm"):
+            child = getattr(module, attr, None)
+            if child is not None:
+                stack.append(child)
+
+
+def _has_inference_arch_modifications(cfg):
+    modifications = cfg.eval.get("inference_arch_modifications", None)
+    if modifications is None:
+        return False
+    modifications = OmegaConf.to_container(modifications, resolve=True)
+    return len(modifications) > 0
 
 
 def _selection_score(metrics, task, cfg):

@@ -103,13 +103,18 @@ class TorchEngineMinimal(torch.nn.Module):
 
         from ..utils import flatten
 
+        disable_compile = not cfg_impl.compile_torch
+        if _uses_dynamic_halt(model):
+            log.warning("Disabling torch.compile because dynamic H-cycle halting uses Python control flow.")
+            disable_compile = True
+
         model = torch.compile(
             model,
             mode=self.cfg_impl.mode,
             dynamic=self.cfg_impl.dynamic,
             fullgraph=self.cfg_impl.fullgraph,
             backend=self.cfg_impl.backend,
-            disable=not cfg_impl.compile_torch,
+            disable=disable_compile,
             # detailed options; cannot be given at the same time as mode:
             options=flatten(cfg_impl._inductor_vars, parent_key="", sep=".") if cfg_impl._inductor_vars is not None else None,
         )
@@ -660,3 +665,11 @@ def _load_optimizer(model, cfg_train, cfg_impl, initial_time):
     scheduler = get_schedule_fn(initial_time, cfg_train)(optimizer_to_schedule)
 
     return optimizer, scheduler
+
+
+def _uses_dynamic_halt(model):
+    config = getattr(model, "config", None)
+    if config is None:
+        return False
+    halt_threshold = float(getattr(config, "halt_threshold", 0.0) or 0.0)
+    return halt_threshold > 0 and (bool(getattr(config, "halt_on_train", False)) or bool(getattr(config, "halt_on_eval", False)))
