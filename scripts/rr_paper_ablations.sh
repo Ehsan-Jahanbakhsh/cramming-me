@@ -12,7 +12,7 @@ set -euo pipefail
 #
 # Groups:
 #   core        - smallest defensible table around the successful tiny8x model
-#   baselines   - BERT/CrammedBERT/ALBERT comparisons at matched dimensions/depths
+#   baselines   - BERT/CrammedBERT/ALBERT and flat shared-RR recurrence controls
 #   components  - RR component ablations: embedding rank, cycles, depth, FFN, norm
 #   sizes       - RR width scaling sweep
 #   all         - core + baselines + components + sizes
@@ -141,6 +141,30 @@ rr() {
     "$@"
 }
 
+rr_flat() {
+  local suffix="$1"
+  local hidden="$2"
+  local heads="$3"
+  local layers="$4"
+  local cycles="$5"
+  local embed_factor="$6"
+  local expansion="$7"
+  shift 7
+  emit "${PREFIX}_rrflat_${suffix}" \
+    arch=recursive-refiner-tiny \
+    arch.recurrence_mode=flat \
+    arch.hidden_size="$hidden" \
+    arch.num_attention_heads="$heads" \
+    arch.num_hidden_layers="$layers" \
+    arch.flat_cycles="$cycles" \
+    arch.hi_cycles=1 \
+    arch.lo_cycles=1 \
+    arch.grad_last_cycle_only=False \
+    arch.embed_factor="$embed_factor" \
+    arch.expansion="$expansion" \
+    "$@"
+}
+
 hfbert() {
   local suffix="$1"
   local hidden="$2"
@@ -202,6 +226,10 @@ group_core() {
 
   # Same dimensions as tiny8x, but no nested RR state/cycles.
   albert_shared h256_eff16_e256 256 4 16 1024 256
+
+  # Exact RR block/embedding control with one latent and flat recurrence.
+  # hi=2, lo=3 makes 8 shared-stack passes (16 physical block applications).
+  rr_flat h256_l2_flat8_ef4 256 4 2 8 4 4.0
 
   # Same hidden width and physical depth.
   hfbert h256_l2 256 4 2 1024

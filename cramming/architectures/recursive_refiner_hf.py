@@ -343,6 +343,8 @@ class RecursiveRefinerConfig(PretrainedConfig):
         num_attention_heads: int = 8,
         num_hidden_layers: int = 2,
         expansion: float = 4.0,
+        recurrence_mode: str = "nested",
+        flat_cycles: int = 8,
         hi_cycles: int = 3,
         lo_cycles: int = 2,
         grad_last_cycle_only: bool = False,
@@ -381,6 +383,10 @@ class RecursiveRefinerConfig(PretrainedConfig):
         self.num_attention_heads = int(num_attention_heads)
         self.num_hidden_layers = int(num_hidden_layers)
         self.expansion = float(expansion)
+        self.recurrence_mode = str(recurrence_mode).lower()
+        if self.recurrence_mode not in ("nested", "flat"):
+            raise ValueError("recurrence_mode must be 'nested' or 'flat'.")
+        self.flat_cycles = int(max(1, flat_cycles))
         self.hi_cycles = int(hi_cycles)
         self.lo_cycles = int(lo_cycles)
         self.grad_last_cycle_only = bool(grad_last_cycle_only)
@@ -457,8 +463,11 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
         ])
         self.shared = SharedReasoningStack(blocks)
 
-        self.hi_init = nn.Parameter(torch.randn(cfg.hidden_size) * 0.02)
-        self.lo_init = nn.Parameter(torch.randn(cfg.hidden_size) * 0.02)
+        if cfg.recurrence_mode == "flat":
+            self.flat_init = nn.Parameter(torch.randn(cfg.hidden_size) * 0.02)
+        else:
+            self.hi_init = nn.Parameter(torch.randn(cfg.hidden_size) * 0.02)
+            self.lo_init = nn.Parameter(torch.randn(cfg.hidden_size) * 0.02)
 
         if cfg.prefix_len > 0:
             self.prefix = nn.Parameter(torch.randn(cfg.prefix_len, cfg.hidden_size) * 0.02)
@@ -468,6 +477,8 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
         self.post_init()
 
     def init_latents(self, batch_size: int, total_len: int, device: torch.device, dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.config.recurrence_mode != "nested":
+            raise RuntimeError("Nested high/low latents are only available in nested recurrence mode.")
         z_hi = self.hi_init.to(device=device, dtype=dtype).view(1, 1, -1).expand(batch_size, total_len, -1).contiguous()
         z_lo = self.lo_init.to(device=device, dtype=dtype).view(1, 1, -1).expand(batch_size, total_len, -1).contiguous()
         return z_hi, z_lo
@@ -613,6 +624,25 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
             if attention_mask is not None:
                 prefix_mask = torch.ones(b, self.config.prefix_len, device=attention_mask.device, dtype=attention_mask.dtype)
                 attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)  # [B, P+L]
+
+        if self.config.recurrence_mode == "flat":
+            hidden_history = [] if output_hidden_states else None
+            # A single learned state receives the token embeddings on every pass.
+            flat_init = self.flat_init.to(device=x.device, dtype=x.dtype)
+            z = flat_init.view(1, 1, -1).expand(b, x.shape[1], -1).contiguous()
+            for _ in range(self.config.flat_cycles):
+                z = self.shared(z, inject=x, attention_mask=attention_mask)
+                if hidden_history is not None:
+                    hidden_history.append(z[:, self.config.prefix_len :])
+            z_final = z
+            z_out = z_final[:, self.config.prefix_len:]  # [B, L, D] (prefix removed)
+            if not return_dict:
+                return (z_out,)
+            return BaseModelOutput(
+                last_hidden_state=z_out,
+                hidden_states=tuple(hidden_history) if hidden_history is not None else None,
+                attentions=None,
+            )
 
         total_len = x.shape[1]
         z_hi, z_lo = self.init_latents(b, total_len=total_len, device=x.device, dtype=x.dtype)

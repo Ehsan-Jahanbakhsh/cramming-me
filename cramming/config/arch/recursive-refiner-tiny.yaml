@@ -15,6 +15,11 @@ num_hidden_layers: 2
 # FFN expansion factor (SwiGLU).
 expansion: 4.0
 
+# Recurrence mode. Flat mode injects token embeddings into one latent state on
+# every shared-stack pass; flat_cycles is ignored in nested mode.
+recurrence_mode: nested
+flat_cycles: 8
+
 # Refinement schedule.
 hi_cycles: 2
 lo_cycles: 3

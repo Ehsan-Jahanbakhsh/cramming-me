@@ -289,6 +289,30 @@ rr() {
     "$@"
 }
 
+rr_flat() {
+  local suffix="$1"
+  local hidden="$2"
+  local heads="$3"
+  local layers="$4"
+  local cycles="$5"
+  local embed_factor="$6"
+  local expansion="$7"
+  shift 7
+  emit "${PREFIX}_rrflat_${suffix}" "$suffix" \
+    arch=recursive-refiner-tiny \
+    arch.recurrence_mode=flat \
+    arch.hidden_size="$hidden" \
+    arch.num_attention_heads="$heads" \
+    arch.num_hidden_layers="$layers" \
+    arch.flat_cycles="$cycles" \
+    arch.hi_cycles=1 \
+    arch.lo_cycles=1 \
+    arch.grad_last_cycle_only=False \
+    arch.embed_factor="$embed_factor" \
+    arch.expansion="$expansion" \
+    "$@"
+}
+
 hfbert() {
   local suffix="$1"
   local hidden="$2"
@@ -347,6 +371,8 @@ group_core() {
   rr tiny8x_h256_l2_c2x3_ef4 256 4 2 2 3 4 4.0
   rr tiny8x_h256_l2_c2x3_ef1 256 4 2 2 3 1 4.0
   albert_shared h256_eff16_e256 256 4 16 1024 256
+  # Same RR blocks, applied as 8 flat stack passes (16 physical block applications).
+  rr_flat h256_l2_flat8_ef4 256 4 2 8 4 4.0
   hfbert h256_l2 256 4 2 1024
   crammed h256_l2 256 4 2 1024
   hfbert h128_l2_param_match 128 2 2 512
