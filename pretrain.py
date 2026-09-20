@@ -16,27 +16,78 @@ log = logging.getLogger(__name__)
 
 def main_training_process(cfg, setup):
     """This function controls the central training loop."""
+    if cfg.impl.name == "deepspeed" and (
+        cfg.impl.save_intermediate_checkpoints
+        or cfg.impl.resume_run_after_preempt
+        or getattr(cfg.impl, "auto_microbatch", False)
+    ):
+        raise ValueError(
+            "Intermediate checkpoint/resume and automatic microbatch sizing are currently supported only by "
+            "the torch-default backend."
+        )
+
     local_time = time.time()
     model = cramming.construct_model(cfg.arch, cfg.data.vocab_size)
     dataset, tokenizer = cramming.load_pretraining_corpus(cfg.data, cfg.impl)
     checkpoint_rendevous = os.path.join(cfg.base_dir, cfg.name, "intermediate_state.pth")
+    resume_metadata = None
     if cfg.impl.resume_run_after_preempt and os.path.isfile(checkpoint_rendevous):
         try:
-            metadata = torch.load(checkpoint_rendevous, map_location=torch.device("cpu"))["metadata"]
-            initial_step, elapsed_time = metadata["step"], metadata["elapsed"]
-        except RuntimeError:
+            resume_metadata = torch.load(checkpoint_rendevous, map_location=torch.device("cpu"))["metadata"]
+            initial_step, elapsed_time = resume_metadata["step"], resume_metadata["elapsed"]
+        except (OSError, RuntimeError, KeyError, TypeError):
             log.info("Checkpoint file unreadable or corrupted.")
             os.remove(checkpoint_rendevous)
             initial_step, elapsed_time = 0, 0.0
     else:
         initial_step, elapsed_time = 0, 0.0
+        if cfg.impl.resume_run_after_preempt:
+            log.info("Resume was requested, but no intermediate checkpoint exists; starting a new run.")
+
+    if resume_metadata is not None:
+        saved_global_batch = resume_metadata.get("global_batch_size")
+        if saved_global_batch is not None and int(saved_global_batch) != int(cfg.train.batch_size):
+            raise ValueError(
+                "Cannot resume with a different train.batch_size: "
+                f"checkpoint used {saved_global_batch}, current config uses {cfg.train.batch_size}."
+            )
 
     model_engine, _, _, dataloader = cramming.load_backend(model, dataset, tokenizer, cfg.train, cfg.impl, elapsed_time, setup=setup)
     if cfg.impl.resume_run_after_preempt and os.path.isfile(checkpoint_rendevous):
         log.info(f"Loading intermediate checkpoint from previous run onto device {cfg.impl.local_rank}...")
         model_engine.load_training_checkpoint(checkpoint_rendevous)
+        if resume_metadata is not None and hasattr(model_engine, "steps"):
+            # Older checkpoints did not store the engine's accumulation/ramp counters.
+            model_engine.steps = int(resume_metadata.get("step", model_engine.steps))
+        if resume_metadata is not None:
+            saved_microbatch = resume_metadata.get("microbatch_size")
+            if saved_microbatch is not None and int(saved_microbatch) != int(cfg.impl.microbatch_size):
+                log.warning(
+                    "Resuming with microbatch_size=%s per GPU; the checkpoint used %s. "
+                    "Keep train.batch_size unchanged to preserve the target global batch.",
+                    cfg.impl.microbatch_size,
+                    saved_microbatch,
+                )
+            saved_world_size = resume_metadata.get("world_size")
+            current_world_size = int(getattr(model_engine, "num_machines", 1))
+            if saved_world_size is not None and int(saved_world_size) != current_world_size:
+                log.warning(
+                    "Resuming with world_size=%s; the checkpoint used world_size=%s. "
+                    "The data partition and automatic microbatch choice may differ.",
+                    current_world_size,
+                    saved_world_size,
+                )
+        log.warning(
+            "Resume restores model/optimizer/scheduler state and step/time, but not the data-loader cursor or RNG state; "
+            "the resumed input stream may repeat examples."
+        )
     model_engine.train(cfg.train.pretrain_in_train_mode)
     stats = defaultdict(list)
+
+    save_interval = int(cfg.impl.save_every_nth_step)
+    if cfg.impl.save_intermediate_checkpoints and save_interval < 1:
+        raise ValueError("impl.save_every_nth_step must be a positive integer when checkpointing is enabled.")
+    next_checkpoint_step = ((initial_step // save_interval) + 1) * save_interval if save_interval > 0 else 0
 
     # Start the clocks now:
     wallclock_timer = time.time() - elapsed_time
@@ -64,10 +115,25 @@ def main_training_process(cfg, setup):
                 training_allowed = False
                 log.info("Loss higher than allowed threshold. Stopping training early...")
 
-        # Checkpointing is triggered from stopping criteria and normal intervals
-        if cfg.impl.save_intermediate_checkpoints and step % cfg.impl.save_every_nth_step == 0:
-            if loss.detach().isfinite() and cramming.utils.is_main_process() and not cfg.dryrun:
-                model_engine.save_training_checkpoint(checkpoint_rendevous, metadata=dict(step=step, elapsed=time.time() - wallclock_timer))
+        # Save at the first optimizer boundary at or after each requested interval
+        # so the checkpoint never drops in-progress gradient accumulation.
+        if cfg.impl.save_intermediate_checkpoints and step >= next_checkpoint_step:
+            boundary = getattr(model_engine, "is_optimizer_step_boundary", True)
+            if callable(boundary):
+                boundary = boundary()
+            if boundary and loss.detach().isfinite():
+                if cramming.utils.is_main_process() and not cfg.dryrun:
+                    metadata = dict(
+                        step=step,
+                        elapsed=time.time() - wallclock_timer,
+                        microbatch_size=int(cfg.impl.microbatch_size),
+                        global_batch_size=int(cfg.train.batch_size),
+                        world_size=int(getattr(model_engine, "num_machines", 1)),
+                    )
+                    log.info("Saving intermediate training checkpoint at microbatch step %s.", step)
+                    model_engine.save_training_checkpoint(checkpoint_rendevous, metadata=metadata)
+                while next_checkpoint_step <= step:
+                    next_checkpoint_step += save_interval
 
         if not loss.detach().isfinite():
             training_allowed, no_recovery_necessary = engage_troubleshooting(

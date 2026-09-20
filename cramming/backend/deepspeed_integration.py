@@ -25,6 +25,9 @@ https://deepspeed.readthedocs.io/en/latest/pipeline.html#deepspeed.runtime.pipe.
 
 def initialize_deepspeed(model, dataset, tokenizer, cfg_train, cfg_impl, setup=_default_setup):
     """Initialize deepspeed. Module is imported lazily here."""
+    if bool(getattr(cfg_impl, "auto_microbatch", False)):
+        raise ValueError("impl.auto_microbatch is currently supported only by the torch-default backend.")
+
     import deepspeed
 
     if cfg_impl.jit == "trace":

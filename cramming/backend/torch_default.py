@@ -11,12 +11,14 @@ that were tested but ultimately discarded, so read that part only if you're inte
 import torch
 import torch._inductor.utils
 
+import gc
 import os
 import json
 from omegaconf import OmegaConf
 from functools import partial
 from contextlib import nullcontext
 import time
+import warnings
 
 import logging
 
@@ -47,17 +49,152 @@ from .optimizers import build_muon_with_aux_adamw
 log = logging.getLogger(__name__)
 _default_setup = dict(device=torch.device("cpu"), dtype=torch.float)
 
-import warnings
+
+def _is_cuda_oom(error):
+    oom_type = getattr(torch.cuda, "OutOfMemoryError", ())
+    return (bool(oom_type) and isinstance(error, oom_type)) or "out of memory" in str(error).lower()
+
+
+def _microbatch_divisors(per_device_batch_size, maximum):
+    """Return candidate per-GPU microbatches that divide the global batch."""
+    limit = min(int(per_device_batch_size), int(maximum))
+    candidates = set()
+    divisor = 1
+    while divisor * divisor <= per_device_batch_size:
+        if per_device_batch_size % divisor == 0:
+            paired_divisor = per_device_batch_size // divisor
+            if divisor <= limit:
+                candidates.add(divisor)
+            if paired_divisor <= limit:
+                candidates.add(paired_divisor)
+        divisor += 1
+    return sorted(candidates)
+
+
+def _auto_select_microbatch_size(model, cfg_train, cfg_impl, setup, amp_settings, world_size, seq_length):
+    """Find the largest divisor of the target batch that fits a forward/backward probe."""
+    device = setup["device"]
+    if device.type != "cuda":
+        raise ValueError("impl.auto_microbatch=True requires a CUDA device.")
+
+    global_batch_size = int(cfg_train.batch_size)
+    if global_batch_size <= 0 or global_batch_size % world_size != 0:
+        raise ValueError(
+            "Automatic microbatch sizing requires train.batch_size to be a positive multiple "
+            f"of the distributed world size (batch={global_batch_size}, world_size={world_size})."
+        )
+
+    per_device_batch_size = global_batch_size // world_size
+    configured_cap = cfg_impl.auto_microbatch_max_size
+    if configured_cap is None:
+        configured_cap = per_device_batch_size
+    configured_cap = int(configured_cap)
+    if configured_cap < 1:
+        raise ValueError("impl.auto_microbatch_max_size must be positive when set.")
+
+    candidates = _microbatch_divisors(per_device_batch_size, configured_cap)
+    if not candidates:
+        raise ValueError("No valid microbatch sizes divide the configured global batch size.")
+
+    memory_margin = float(cfg_impl.auto_microbatch_memory_margin)
+    if not 0.0 <= memory_margin < 1.0:
+        raise ValueError("impl.auto_microbatch_memory_margin must be in [0, 1).")
+    optimizer_state_factor = float(cfg_impl.auto_microbatch_optimizer_state_factor)
+    if optimizer_state_factor < 0.0:
+        raise ValueError("impl.auto_microbatch_optimizer_state_factor must be non-negative.")
+
+    trainable_parameter_bytes = sum(
+        parameter.numel() * parameter.element_size()
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
+    optimizer_state_reserve = int(trainable_parameter_bytes * optimizer_state_factor)
+    original_module_modes = [(module, module.training) for module in model.modules()]
+    cpu_rng_state = torch.get_rng_state()
+    cuda_rng_state = torch.cuda.get_rng_state(device)
+    use_training_mode = bool(cfg_train.pretrain_in_train_mode)
+
+    def candidate_fits(batch_size):
+        model.zero_grad(set_to_none=True)
+        torch.cuda.synchronize(device)
+        torch.cuda.empty_cache()
+        free_bytes, _ = torch.cuda.mem_get_info(device)
+        baseline_allocated = torch.cuda.memory_allocated(device)
+        safety_bytes = int(free_bytes * memory_margin)
+        if free_bytes <= optimizer_state_reserve + safety_bytes:
+            return False
+
+        input_ids = labels = outputs = loss = None
+        try:
+            model.train(use_training_mode)
+            torch.cuda.reset_peak_memory_stats(device)
+            input_ids = torch.zeros((batch_size, seq_length), dtype=torch.long, device=device)
+            labels = torch.zeros_like(input_ids)
+            with torch.autocast(**amp_settings):
+                outputs = model(input_ids=input_ids, labels=labels)
+                loss = outputs["loss"]
+            loss.backward()
+            torch.cuda.synchronize(device)
+            peak_increment = max(0, torch.cuda.max_memory_allocated(device) - baseline_allocated)
+            return peak_increment + optimizer_state_reserve + safety_bytes <= free_bytes
+        except RuntimeError as error:
+            if _is_cuda_oom(error):
+                log.info("Auto microbatch probe: %s examples/GPU did not fit.", batch_size)
+                return False
+            raise
+        finally:
+            model.zero_grad(set_to_none=True)
+            del input_ids, labels, outputs, loss
+            for module, was_training in original_module_modes:
+                module.training = was_training
+            torch.set_rng_state(cpu_rng_state)
+            torch.cuda.set_rng_state(cuda_rng_state, device)
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    low, high = 0, len(candidates) - 1
+    selected = 0
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = candidates[middle]
+        if candidate_fits(candidate):
+            selected = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+
+    if torch.distributed.is_initialized():
+        selected_tensor = torch.tensor(selected, dtype=torch.int64, device=device)
+        torch.distributed.all_reduce(selected_tensor, op=torch.distributed.ReduceOp.MIN)
+        selected = int(selected_tensor.item())
+
+    if selected < 1:
+        raise RuntimeError(
+            "Automatic microbatch sizing could not fit even one example per GPU. "
+            "Reduce sequence/model size or use a GPU with more free memory."
+        )
+
+    log.info(
+        "Auto-selected microbatch_size=%s per GPU (global batch=%s, world_size=%s, "
+        "cap=%s, sequence_length=%s, optimizer-state reserve=%.2f GiB, safety margin=%.0f%%).",
+        selected,
+        global_batch_size,
+        world_size,
+        configured_cap,
+        seq_length,
+        optimizer_state_reserve / (1024**3),
+        memory_margin * 100.0,
+    )
+    return selected
 
 warnings.filterwarnings("ignore", "Detected call of ", UserWarning)  # schedulers are deliberately used differently
 
 
 def initialize_torch(model, dataset, tokenizer, cfg_train, cfg_impl, elapsed_time, setup=_default_setup):
     """initialize a torch engine."""
-    if dataset is not None:
+    dataloader = None
+    if dataset is not None and not bool(cfg_impl.auto_microbatch):
         dataloader = prepare_pretraining_dataloader(dataset, tokenizer, cfg_train, cfg_impl)
-    else:
-        dataloader = None
 
     # in most cases we can use a simpler Engine class:
     require_full_engine = "sequence_curriculum" in cfg_train or "weight_averaging" in cfg_train or "gradinit" in cfg_train
@@ -67,6 +204,9 @@ def initialize_torch(model, dataset, tokenizer, cfg_train, cfg_impl, elapsed_tim
     else:
         model_engine = TorchEngineMinimal(model, cfg_train, cfg_impl, elapsed_time, setup=setup, seq_length=tokenizer.model_max_length)
     model_engine.train()  # This is the default engine state. Pretraining scripts may change this.
+    if dataset is not None and dataloader is None:
+        # Automatic sizing updates cfg_impl.microbatch_size before constructing the loader.
+        dataloader = prepare_pretraining_dataloader(dataset, tokenizer, cfg_train, cfg_impl)
     return model_engine, model_engine.optimizer, model_engine.scheduler, dataloader
 
 
@@ -82,11 +222,8 @@ class TorchEngineMinimal(torch.nn.Module):
 
         self.cfg_train = cfg_train
         self.cfg_impl = cfg_impl
-        if self.cfg_impl.microbatch_size is None:
-            self.cfg_impl.microbatch_size = self.cfg_train.batch_size
-        if self.cfg_impl.microbatch_size > self.cfg_train.batch_size:
-            raise ValueError(f"MBS is {self.cfg_impl.microbatch_size}, but BS is only {self.cfg_train.batch_size}.")
         self.current_seq_length = seq_length
+        self.num_machines = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
 
         # Mixed Precision:
         enabled = self.cfg_impl.mixed_precision if setup["device"].type != "cpu" else False
@@ -100,6 +237,22 @@ class TorchEngineMinimal(torch.nn.Module):
         # Choose setup and move model
         self.setup = setup
         model.to(**self.setup)
+
+        if bool(self.cfg_impl.auto_microbatch):
+            self.cfg_impl.microbatch_size = _auto_select_microbatch_size(
+                model,
+                self.cfg_train,
+                self.cfg_impl,
+                self.setup,
+                self.amp_settings,
+                self.num_machines,
+                self.current_seq_length,
+            )
+        else:
+            if self.cfg_impl.microbatch_size is None:
+                self.cfg_impl.microbatch_size = self.cfg_train.batch_size
+            if self.cfg_impl.microbatch_size > self.cfg_train.batch_size:
+                raise ValueError(f"MBS is {self.cfg_impl.microbatch_size}, but BS is only {self.cfg_train.batch_size}.")
 
         from ..utils import flatten
 
@@ -121,11 +274,9 @@ class TorchEngineMinimal(torch.nn.Module):
 
         if torch.distributed.is_initialized():
             self.model = self._init_distributed(model)
-            self.num_machines = torch.distributed.get_world_size()
         else:
             self.model = model
             self.model.no_sync = nullcontext
-            self.num_machines = 1
 
         # Microbatch accumulation settings and counters
         self.effective_mbs = self.cfg_impl.microbatch_size * self.num_machines  # across machines
@@ -136,6 +287,11 @@ class TorchEngineMinimal(torch.nn.Module):
 
         self.initial_time = time.time() - already_elapsed_time
         self.optimizer, self.scheduler = _load_optimizer(model, cfg_train, cfg_impl, self.initial_time)
+
+    @property
+    def is_optimizer_step_boundary(self):
+        """Whether accumulated gradients are empty and an intermediate save is safe."""
+        return self.accumulated_samples == 0
 
     def step(self, batch: dict[str, torch.Tensor]):
         self.accumulated_samples += self.effective_mbs
@@ -287,8 +443,9 @@ class TorchEngineMinimal(torch.nn.Module):
         Has to be .pth because safetensors are annoying to dump a bunch of optim states, scales and schedules
         """
         file = os.path.join(directory, str(identifier))
-        if directory != "":
-            os.makedirs(directory, exist_ok=True)
+        parent_directory = os.path.dirname(file)
+        if parent_directory:
+            os.makedirs(parent_directory, exist_ok=True)
 
         save_state = dict()
         save_state["optim"] = self.optimizer.state_dict()
@@ -299,7 +456,13 @@ class TorchEngineMinimal(torch.nn.Module):
         extra_state = self._extra_checkpoint_state()
         if extra_state:
             save_state["engine"] = extra_state
-        torch.save(save_state, file)
+        temporary_file = f"{file}.tmp"
+        try:
+            torch.save(save_state, temporary_file)
+            os.replace(temporary_file, file)
+        finally:
+            if os.path.isfile(temporary_file):
+                os.remove(temporary_file)
 
     def load_training_checkpoint(self, identifier="intermediate.pth", directory=""):
         self.optimizer.zero_grad()
@@ -315,9 +478,18 @@ class TorchEngineMinimal(torch.nn.Module):
         return save_state["metadata"]
 
     def _extra_checkpoint_state(self):
-        return {}
+        return {
+            "steps": self.steps,
+            "current_batch_size": self.current_batch_size,
+        }
 
     def _load_extra_checkpoint_state(self, state):
+        if not state:
+            return None
+        self.steps = int(state.get("steps", self.steps))
+        current_batch_size = state.get("current_batch_size")
+        if current_batch_size is not None:
+            self.set_train_batch_size(int(current_batch_size))
         return None
 
     def save_final_model(self, base_directory, identifier, tokenizer, cfg_arch, dryrun=False):
@@ -512,7 +684,7 @@ class TorchEngineFull(TorchEngineMinimal):
             return super().retrieve_model_state_dict()
 
     def _extra_checkpoint_state(self):
-        state = {}
+        state = super()._extra_checkpoint_state()
         if self.weight_averaging_frequency > 0 and hasattr(self, "param_store"):
             state["weight_averaging"] = {
                 "param_store": self.param_store,
@@ -526,6 +698,8 @@ class TorchEngineFull(TorchEngineMinimal):
     def _load_extra_checkpoint_state(self, state):
         if not state:
             return None
+
+        super()._load_extra_checkpoint_state(state)
 
         averaging_state = state.get("weight_averaging")
         if averaging_state is not None and self.weight_averaging_frequency > 0:

@@ -17,6 +17,9 @@ set -euo pipefail
 #   GPU_PROFILE=h200 PREFIX=rr_h200 bash scripts/rr_paper_h200_ablations.sh pretrain sizes
 #   BUDGET_LARGE=72 H1024_MBS=256 bash scripts/rr_paper_h200_ablations.sh pretrain sizes
 #   FIXED_RECIPE=1 bash scripts/rr_paper_h200_ablations.sh pretrain core
+#   RESUME_RUN_AFTER_PREEMPT=True bash scripts/rr_paper_h200_ablations.sh pretrain core
+#   AUTO_MICROBATCH_MAX_SIZE=512 caps the automatically selected per-GPU microbatch
+# The GPU-profile MBS values are used when automatic sizing is disabled.
 
 ACTION="${1:-print-pretrain}"
 GROUP="${2:-core}"
@@ -36,6 +39,16 @@ EVAL_BATCH="${EVAL_BATCH:-16}"
 EVAL_LR="${EVAL_LR:-8e-5}"
 COMPILE_TORCH="${COMPILE_TORCH:-True}"
 MIXED_PRECISION_TARGET_DTYPE="${MIXED_PRECISION_TARGET_DTYPE:-float16}"
+AUTO_MICROBATCH_MAX_SIZE="${AUTO_MICROBATCH_MAX_SIZE:-null}"
+RESUME_RUN_AFTER_PREEMPT="${RESUME_RUN_AFTER_PREEMPT:-False}"
+SAVE_EVERY_NTH_STEP="${SAVE_EVERY_NTH_STEP:-100000}"
+if [[ -z "${AUTO_MICROBATCH:-}" ]]; then
+  if [[ "$FIXED_RECIPE" == "1" ]]; then
+    AUTO_MICROBATCH="False"
+  else
+    AUTO_MICROBATCH="True"
+  fi
+fi
 
 # Optional global defaults. Per-size defaults are chosen below if these are unset.
 TRAIN_BATCH="${TRAIN_BATCH:-}"
@@ -198,7 +211,7 @@ pretrain_cmd() {
     mbs="$batch"
   fi
 
-  comment "profile=${GPU_PROFILE} fixed_recipe=${FIXED_RECIPE} name=${name} size=${size} budget=${budget}h batch=${batch} microbatch=${mbs}"
+  comment "profile=${GPU_PROFILE} fixed_recipe=${FIXED_RECIPE} name=${name} size=${size} budget=${budget}h batch=${batch} configured_microbatch=${mbs}"
   run_cmd \
     python pretrain.py \
     name="$name" \
@@ -209,6 +222,11 @@ pretrain_cmd() {
     train.batch_size="$batch" \
     dryrun="$DRYRUN" \
     impl.microbatch_size="$mbs" \
+    impl.auto_microbatch="$AUTO_MICROBATCH" \
+    impl.auto_microbatch_max_size="$AUTO_MICROBATCH_MAX_SIZE" \
+    impl.save_intermediate_checkpoints=True \
+    impl.save_every_nth_step="$SAVE_EVERY_NTH_STEP" \
+    impl.resume_run_after_preempt="$RESUME_RUN_AFTER_PREEMPT" \
     impl.compile_torch="$COMPILE_TORCH" \
     impl.mixed_precision_target_dtype="$MIXED_PRECISION_TARGET_DTYPE" \
     "wandb.tags=[rr-paper,h200,pretrain]" \

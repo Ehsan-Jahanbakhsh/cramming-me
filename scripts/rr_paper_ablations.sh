@@ -16,6 +16,12 @@ set -euo pipefail
 #   components  - RR component ablations: embedding rank, cycles, depth, FFN, norm
 #   sizes       - RR width scaling sweep
 #   all         - core + baselines + components + sizes
+#
+# Resume the same named runs with:
+#   RESUME_RUN_AFTER_PREEMPT=True bash scripts/rr_paper_ablations.sh pretrain core
+# Disable automatic GPU sizing with AUTO_MICROBATCH=False.
+# Cap automatic sizing with AUTO_MICROBATCH_MAX_SIZE=256.
+# TRAIN_MBS is used when automatic sizing is disabled.
 
 ACTION="${1:-print-pretrain}"
 GROUP="${2:-core}"
@@ -30,6 +36,10 @@ EVAL_EPOCHS="${EVAL_EPOCHS:-4}"
 EVAL_BATCH="${EVAL_BATCH:-16}"
 EVAL_LR="${EVAL_LR:-8e-5}"
 COMPILE_TORCH="${COMPILE_TORCH:-True}"
+AUTO_MICROBATCH="${AUTO_MICROBATCH:-True}"
+AUTO_MICROBATCH_MAX_SIZE="${AUTO_MICROBATCH_MAX_SIZE:-null}"
+RESUME_RUN_AFTER_PREEMPT="${RESUME_RUN_AFTER_PREEMPT:-False}"
+SAVE_EVERY_NTH_STEP="${SAVE_EVERY_NTH_STEP:-100000}"
 
 PHASE=""
 EXECUTE="false"
@@ -69,6 +79,11 @@ pretrain_cmd() {
     budget="$BUDGET" \
     dryrun="$DRYRUN" \
     impl.microbatch_size="$TRAIN_MBS" \
+    impl.auto_microbatch="$AUTO_MICROBATCH" \
+    impl.auto_microbatch_max_size="$AUTO_MICROBATCH_MAX_SIZE" \
+    impl.save_intermediate_checkpoints=True \
+    impl.save_every_nth_step="$SAVE_EVERY_NTH_STEP" \
+    impl.resume_run_after_preempt="$RESUME_RUN_AFTER_PREEMPT" \
     impl.compile_torch="$COMPILE_TORCH" \
     "wandb.tags=[rr-paper,pretrain]" \
     "$@"

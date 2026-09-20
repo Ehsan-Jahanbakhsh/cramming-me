@@ -19,7 +19,7 @@ max_raw_chunk_size: 8e6
 # checkpointing and logging:
 print_loss_every_nth_step: 1000
 save_intermediate_checkpoints: False
-save_every_nth_step: 10000
+save_every_nth_step: 100000 # training-loop microbatch iterations; saves wait for a completed optimizer update
 resume_run_after_preempt: False
 
 # checkpoint troubleshooting (should only be relevant for >100bil token runs)

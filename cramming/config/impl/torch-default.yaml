@@ -7,6 +7,17 @@ defaults:
 mixed_precision: True # turns on AMP on GPUs/Intel devices. The default precision needs to be float
 grad_scaling: True # Only activates when mixed_precision=True
 mixed_precision_target_dtype: float16 # you might try your luck with bfloat16 too
+save_intermediate_checkpoints: True # periodic recovery checkpoints; resume explicitly with impl.resume_run_after_preempt=True
+
+# Optional per-GPU microbatch selection. When enabled, Torch probes the model
+# with forward/backward passes and chooses the largest batch that fits, leaving
+# room for optimizer state and a VRAM safety margin. An explicit
+# auto_microbatch_max_size caps the search; otherwise it searches up to the
+# per-GPU share of train.batch_size and ignores microbatch_size.
+auto_microbatch: False
+auto_microbatch_max_size:
+auto_microbatch_memory_margin: 0.20
+auto_microbatch_optimizer_state_factor: 2.0
 
 # Distributed training:
 zero_redundancy_optimizer: False # requires limited_decay_keys=[] for pytorch<=1.10.2
