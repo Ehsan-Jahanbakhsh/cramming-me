@@ -30,6 +30,9 @@ PREFIX="${PREFIX:-rr_paper}"
 SEED="${SEED:-1975620753}"
 BUDGET="${BUDGET:-8}"
 TRAIN_MBS="${TRAIN_MBS:-256}"
+TRAIN_BATCH="${TRAIN_BATCH:-2048}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
+FIXED_UPDATES="${FIXED_UPDATES:-}"
 EVAL_MBS="${EVAL_MBS:-16}"
 EVAL_CFG="${EVAL_CFG:-GLUE}"
 EVAL_EPOCHS="${EVAL_EPOCHS:-4}"
@@ -40,6 +43,11 @@ AUTO_MICROBATCH="${AUTO_MICROBATCH:-True}"
 AUTO_MICROBATCH_MAX_SIZE="${AUTO_MICROBATCH_MAX_SIZE:-null}"
 RESUME_RUN_AFTER_PREEMPT="${RESUME_RUN_AFTER_PREEMPT:-False}"
 SAVE_EVERY_NTH_STEP="${SAVE_EVERY_NTH_STEP:-100000}"
+
+if ! [[ "$NPROC_PER_NODE" =~ ^[1-9][0-9]*$ ]]; then
+  echo "NPROC_PER_NODE must be a positive integer, got: $NPROC_PER_NODE" >&2
+  exit 2
+fi
 
 PHASE=""
 EXECUTE="false"
@@ -70,15 +78,77 @@ run_cmd() {
 pretrain_cmd() {
   local name="$1"
   shift
+
+  local mbs="$TRAIN_MBS"
+  local batch="$TRAIN_BATCH"
+  local steps=""
+  local arg
+  local extra_args=()
+  local run_overrides=()
+  local launcher=(python pretrain.py)
+
+  for arg in "$@"; do
+    case "$arg" in
+      impl.microbatch_size=*) mbs="${arg#impl.microbatch_size=}" ;;
+      train.batch_size=*) batch="${arg#train.batch_size=}" ;;
+      train.steps=*|train.scheduler=*|train.batch_size_ramp=*|train.warmup_steps=*|train.cooldown_steps=*)
+        if [[ -n "$FIXED_UPDATES" ]]; then
+          echo "FIXED_UPDATES controls $arg; remove this per-run override." >&2
+          exit 2
+        fi
+        extra_args+=("$arg")
+        ;;
+      *) extra_args+=("$arg") ;;
+    esac
+  done
+
+  if (( NPROC_PER_NODE > 1 )); then
+    launcher=(torchrun --nproc_per_node="$NPROC_PER_NODE" --standalone pretrain.py)
+  fi
+
+  if [[ -n "$FIXED_UPDATES" ]]; then
+    if ! [[ "$FIXED_UPDATES" =~ ^[1-9][0-9]*$ ]]; then
+      echo "FIXED_UPDATES must be a positive integer, got: $FIXED_UPDATES" >&2
+      exit 2
+    fi
+    if ! [[ "$mbs" =~ ^[1-9][0-9]*$ && "$batch" =~ ^[1-9][0-9]*$ ]]; then
+      echo "TRAIN_MBS and TRAIN_BATCH must be positive integers for fixed-update runs." >&2
+      exit 2
+    fi
+    case "$AUTO_MICROBATCH" in
+      True|TRUE|true|1|yes|YES)
+        echo "Fixed-update runs require AUTO_MICROBATCH=False so the script can derive train.steps." >&2
+        exit 2
+        ;;
+    esac
+    local effective_mbs=$((mbs * NPROC_PER_NODE))
+    if (( effective_mbs > batch || batch % effective_mbs != 0 )); then
+      echo "Global batch ($batch) must be divisible by microbatch_size * NPROC_PER_NODE ($effective_mbs)." >&2
+      exit 2
+    fi
+
+    # train.steps counts microbatch iterations in this trainer. Convert the
+    # requested optimizer updates using the fixed global batch and accumulation.
+    steps=$((FIXED_UPDATES * batch / effective_mbs))
+    run_overrides+=(
+      train.steps="$steps"
+      train.scheduler=one-cycle
+      train.batch_size_ramp=0
+      train.warmup_steps=0
+      train.cooldown_steps=0
+    )
+  fi
+
   run_cmd \
-    python pretrain.py \
+    "${launcher[@]}" \
     name="$name" \
     seed="$SEED" \
     data=pile-readymade \
     train=rr-me-onecycle \
     budget="$BUDGET" \
     dryrun="$DRYRUN" \
-    impl.microbatch_size="$TRAIN_MBS" \
+    train.batch_size="$batch" \
+    impl.microbatch_size="$mbs" \
     impl.auto_microbatch="$AUTO_MICROBATCH" \
     impl.auto_microbatch_max_size="$AUTO_MICROBATCH_MAX_SIZE" \
     impl.save_intermediate_checkpoints=True \
@@ -86,7 +156,8 @@ pretrain_cmd() {
     impl.resume_run_after_preempt="$RESUME_RUN_AFTER_PREEMPT" \
     impl.compile_torch="$COMPILE_TORCH" \
     "wandb.tags=[rr-paper,pretrain]" \
-    "$@"
+    "${run_overrides[@]}" \
+    "${extra_args[@]}"
 }
 
 eval_cmd() {

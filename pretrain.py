@@ -83,6 +83,7 @@ def main_training_process(cfg, setup):
         )
     model_engine.train(cfg.train.pretrain_in_train_mode)
     stats = defaultdict(list)
+    loss = torch.as_tensor(resume_metadata["loss"]) if resume_metadata is not None and "loss" in resume_metadata else None
 
     save_interval = int(cfg.impl.save_every_nth_step)
     if cfg.impl.save_intermediate_checkpoints and save_interval < 1:
@@ -97,6 +98,9 @@ def main_training_process(cfg, setup):
 
     # Launch training
     for step, batch in enumerate(dataloader, initial_step + 1):
+        if step > cfg.train.steps:
+            log.info("Checkpoint is already at or beyond the configured training step; no more updates are needed.")
+            break
 
         # Heavy lifting is moved to engines
         device_batch = model_engine.to_device(batch)
@@ -104,9 +108,12 @@ def main_training_process(cfg, setup):
         loss_vals.append(loss.detach())
 
         # Check stopping criteria
-        if check_deadline(wallclock_timer, cfg.budget) or step == cfg.train.steps:
+        if check_deadline(wallclock_timer, cfg.budget):
             training_allowed = False
             log.info("Reached deadline. Stopping training ...")
+        elif step >= cfg.train.steps:
+            training_allowed = False
+            log.info("Reached configured training step. Stopping training ...")
 
         # Collect stats and print to console and upload to wandb
         if step % cfg.impl.print_loss_every_nth_step == 0:
@@ -129,6 +136,7 @@ def main_training_process(cfg, setup):
                         microbatch_size=int(cfg.impl.microbatch_size),
                         global_batch_size=int(cfg.train.batch_size),
                         world_size=int(getattr(model_engine, "num_machines", 1)),
+                        loss=float(loss.detach().item()),
                     )
                     log.info("Saving intermediate training checkpoint at microbatch step %s.", step)
                     model_engine.save_training_checkpoint(checkpoint_rendevous, metadata=metadata)
@@ -152,7 +160,7 @@ def main_training_process(cfg, setup):
 
     # Save to summary:
     cramming.utils.save_summary("pretrain", cfg, stats, time.time() - local_time, setup)
-    if cramming.utils.is_main_process():
+    if cramming.utils.is_main_process() and loss is not None:
         # Save final checkpoint? Might have to recover the latest checkpoint first
         if not loss.detach().isfinite() and cfg.impl.save_intermediate_checkpoints:
             model_engine.load_training_checkpoint(checkpoint_rendevous)
@@ -169,7 +177,9 @@ def main_training_process(cfg, setup):
 
 
 def check_deadline(launch_time, hour_limit):
-    """These measurements are deliberately wall-clock based."""
+    """Check the wall-clock limit; zero or a negative value disables it."""
+    if hour_limit is None or hour_limit <= 0:
+        return False
     current_time = time.time()
     return True if (current_time - launch_time) / 3600 > hour_limit else False
 
