@@ -384,8 +384,8 @@ class RecursiveRefinerConfig(PretrainedConfig):
         self.num_hidden_layers = int(num_hidden_layers)
         self.expansion = float(expansion)
         self.recurrence_mode = str(recurrence_mode).lower()
-        if self.recurrence_mode not in ("nested", "flat"):
-            raise ValueError("recurrence_mode must be 'nested' or 'flat'.")
+        if self.recurrence_mode not in ("nested", "flat", "flat_untied"):
+            raise ValueError("recurrence_mode must be 'nested', 'flat', or 'flat_untied'.")
         self.flat_cycles = int(max(1, flat_cycles))
         self.hi_cycles = int(hi_cycles)
         self.lo_cycles = int(lo_cycles)
@@ -449,6 +449,10 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
         max_len = cfg.max_position_embeddings + cfg.prefix_len
         rope = RotaryPositionalEmbedding(dim=cfg.hidden_size // cfg.num_attention_heads, base=cfg.rope_theta, max_seq_len=max_len)
 
+        block_count = cfg.num_hidden_layers
+        if cfg.recurrence_mode == "flat_untied":
+            block_count *= cfg.flat_cycles
+
         blocks = nn.ModuleList([
             RecursiveReasoningBlock(
                 dim=cfg.hidden_size,
@@ -459,11 +463,14 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
                 pre_norm=cfg.pre_norm,
                 is_causal=cfg.is_causal,
             )
-            for _ in range(cfg.num_hidden_layers)
+            for _ in range(block_count)
         ])
-        self.shared = SharedReasoningStack(blocks)
+        if cfg.recurrence_mode == "flat_untied":
+            self.flat_untied_blocks = blocks
+        else:
+            self.shared = SharedReasoningStack(blocks)
 
-        if cfg.recurrence_mode == "flat":
+        if cfg.recurrence_mode in ("flat", "flat_untied"):
             self.flat_init = nn.Parameter(torch.randn(cfg.hidden_size) * 0.02)
         else:
             self.hi_init = nn.Parameter(torch.randn(cfg.hidden_size) * 0.02)
@@ -625,13 +632,22 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
                 prefix_mask = torch.ones(b, self.config.prefix_len, device=attention_mask.device, dtype=attention_mask.dtype)
                 attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)  # [B, P+L]
 
-        if self.config.recurrence_mode == "flat":
+        if self.config.recurrence_mode in ("flat", "flat_untied"):
             hidden_history = [] if output_hidden_states else None
             # A single learned state receives the token embeddings on every pass.
             flat_init = self.flat_init.to(device=x.device, dtype=x.dtype)
             z = flat_init.view(1, 1, -1).expand(b, x.shape[1], -1).contiguous()
-            for _ in range(self.config.flat_cycles):
-                z = self.shared(z, inject=x, attention_mask=attention_mask)
+            for cycle_idx in range(self.config.flat_cycles):
+                if self.config.recurrence_mode == "flat":
+                    z = self.shared(z, inject=x, attention_mask=attention_mask)
+                else:
+                    # Match flat shared recurrence: inject embeddings once before
+                    # each pass through the two-layer RR stack.
+                    z = z + x
+                    first_block = cycle_idx * self.config.num_hidden_layers
+                    for layer_idx in range(self.config.num_hidden_layers):
+                        block = self.flat_untied_blocks[first_block + layer_idx]
+                        z = block(z, attention_mask=attention_mask)
                 if hidden_history is not None:
                     hidden_history.append(z[:, self.config.prefix_len :])
             z_final = z
