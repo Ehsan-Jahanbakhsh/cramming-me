@@ -150,7 +150,10 @@ class LowRankEmbedding(nn.Module):
         logits(x) = x @ W_full^T
     """
 
-    def __init__(self, vocab_size: int, dim: int, n: int = 4, init_std: float = 0.02):
+    def __init__(
+        self, vocab_size: int, dim: int, n: int = 4, init_std: float = 0.02,
+        factorized_init: str = "variance_matched",
+    ):
         super().__init__()
         if n < 1:
             raise ValueError("embed_factor must be >= 1")
@@ -159,6 +162,9 @@ class LowRankEmbedding(nn.Module):
         self.vocab_size = int(vocab_size)
         self.dim = int(dim)
         self.embed_factor = int(n)
+        if factorized_init not in ("variance_matched", "legacy"):
+            raise ValueError("factorized_init must be 'variance_matched' or 'legacy'")
+        self.factorized_init = factorized_init
 
         r = dim // n
         self.rank = r
@@ -175,8 +181,14 @@ class LowRankEmbedding(nn.Module):
         # init
         nn.init.normal_(self.tok.weight, mean=0.0, std=init_std)
         if self.use_mid:
-            nn.init.normal_(self.mid, mean=0.0, std=init_std)
-            nn.init.normal_(self.out, mean=0.0, std=init_std)
+            if self.factorized_init == "legacy":
+                nn.init.normal_(self.mid, mean=0.0, std=init_std)
+                nn.init.normal_(self.out, mean=0.0, std=init_std)
+            else:
+                # W_tok @ I @ W_out has the same per-coordinate variance as
+                # a full embedding initialized with std=init_std.
+                nn.init.eye_(self.mid)
+                nn.init.normal_(self.out, mean=0.0, std=self.rank**-0.5)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         x = self.tok(input_ids)  # [B, T, r]
@@ -219,7 +231,14 @@ class LowRankEmbedding(nn.Module):
 # ============================================================
 
 class SelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int, rope: Optional[RotaryPositionalEmbedding] = None, is_causal: bool = False):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        rope: Optional[RotaryPositionalEmbedding] = None,
+        is_causal: bool = False,
+        use_sdpa: bool = True,
+    ):
         super().__init__()
         if dim % num_heads != 0:
             raise ValueError("dim must be divisible by num_heads")
@@ -228,11 +247,52 @@ class SelfAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.rope = rope
         self.is_causal = bool(is_causal)
+        self.use_sdpa = bool(use_sdpa)
 
         self.q_proj = nn.Linear(dim, dim, bias=True)
         self.k_proj = nn.Linear(dim, dim, bias=True)
         self.v_proj = nn.Linear(dim, dim, bias=True)
         self.out = nn.Linear(dim, dim, bias=True)
+
+    def _build_sdpa_mask(
+        self,
+        attention_mask: Optional[torch.Tensor],
+        batch_size: int,
+        seq_len: int,
+        device: torch.device,
+    ) -> Optional[torch.Tensor]:
+        if attention_mask is None:
+            return None
+
+        # SDPA bool masks use True for positions that are allowed to attend.
+        mask = attention_mask.to(dtype=torch.bool, device=device).view(batch_size, 1, 1, seq_len)
+
+        if self.is_causal:
+            causal = torch.ones((seq_len, seq_len), device=device, dtype=torch.bool).tril().view(1, 1, seq_len, seq_len)
+            mask = mask & causal
+
+        return mask
+
+    def _manual_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        b, _, t, _ = q.shape
+        att = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)  # [B, H, T, T]
+
+        if self.is_causal:
+            causal = torch.tril(torch.ones((t, t), device=att.device, dtype=torch.bool))
+            att = att.masked_fill(~causal.view(1, 1, t, t), torch.finfo(att.dtype).min)
+
+        if attention_mask is not None:
+            key_mask = attention_mask.to(dtype=torch.bool, device=att.device).view(b, 1, 1, t)
+            att = att.masked_fill(~key_mask, torch.finfo(att.dtype).min)
+
+        att = F.softmax(att, dim=-1)
+        return torch.matmul(att, v)  # [B, H, T, Hd]
 
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
@@ -256,20 +316,19 @@ class SelfAttention(nn.Module):
             q = apply_rope(q, cos, sin)
             k = apply_rope(k, cos, sin)
 
-        att = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)  # [B, H, T, T]
+        if self.use_sdpa and hasattr(F, "scaled_dot_product_attention"):
+            sdpa_mask = self._build_sdpa_mask(attention_mask, b, t, q.device)
+            y = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=sdpa_mask,
+                dropout_p=0.0,
+                is_causal=(self.is_causal and sdpa_mask is None),
+            )
+        else:
+            y = self._manual_attention(q, k, v, attention_mask)
 
-        # Causal mask: prevent attending to future positions.
-        if self.is_causal:
-            causal = torch.tril(torch.ones((t, t), device=att.device, dtype=torch.bool))
-            att = att.masked_fill(~causal.view(1, 1, t, t), torch.finfo(att.dtype).min)
-
-        if attention_mask is not None:
-            # Mask out *keys* that correspond to padding.
-            key_mask = attention_mask.to(dtype=torch.bool, device=att.device).view(b, 1, 1, t)
-            att = att.masked_fill(~key_mask, torch.finfo(att.dtype).min)
-
-        att = F.softmax(att, dim=-1)
-        y = torch.matmul(att, v)  # [B, H, T, Hd]
         y = y.transpose(1, 2).contiguous().view(b, t, d)
         y = self.out(y)
 
@@ -294,10 +353,11 @@ class RecursiveReasoningBlock(nn.Module):
         rope: Optional[RotaryPositionalEmbedding],
         pre_norm: bool,
         is_causal: bool,
+        use_sdpa: bool,
     ):
         super().__init__()
         self.pre_norm = bool(pre_norm)
-        self.attn = SelfAttention(dim=dim, num_heads=num_heads, rope=rope, is_causal=is_causal)
+        self.attn = SelfAttention(dim=dim, num_heads=num_heads, rope=rope, is_causal=is_causal, use_sdpa=use_sdpa)
         self.ffn = SwiGLUFeedForward(dim=dim, expansion=expansion)
 
         self.norm1 = RootMeanSquareNorm(dim, eps=eps)
@@ -356,6 +416,7 @@ class RecursiveRefinerConfig(PretrainedConfig):
         halt_batch_reduction: str = "max",
         halt_epsilon: float = 1e-6,
         embed_factor: int = 4,
+        factorized_init: str = "variance_matched",
         pre_norm: bool = True,
         rope_theta: float = 10000.0,
         rms_eps: float = 1e-5,
@@ -368,6 +429,7 @@ class RecursiveRefinerConfig(PretrainedConfig):
         # Downstream / fine-tuning helpers.
         classifier_dropout: float = 0.1,
         pooler_type: str = "cls",
+        use_sdpa: bool = True,
         **kwargs,
     ):
         super().__init__(
@@ -400,6 +462,9 @@ class RecursiveRefinerConfig(PretrainedConfig):
             raise ValueError("halt_batch_reduction must be 'max' or 'mean'.")
         self.halt_epsilon = float(halt_epsilon)
         self.embed_factor = int(embed_factor)
+        self.factorized_init = str(factorized_init)
+        if self.factorized_init not in ("variance_matched", "legacy"):
+            raise ValueError("factorized_init must be 'variance_matched' or 'legacy'.")
         self.pre_norm = bool(pre_norm)
         self.rope_theta = float(rope_theta)
         self.rms_eps = float(rms_eps)
@@ -409,6 +474,7 @@ class RecursiveRefinerConfig(PretrainedConfig):
         # Fine-tuning helpers.
         self.classifier_dropout = float(classifier_dropout)
         self.pooler_type = str(pooler_type)
+        self.use_sdpa = bool(use_sdpa)
 
         # HF flags: useful for generation utilities.
         # For causal LM heads we will set is_decoder=True externally.
@@ -443,7 +509,9 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
         super().__init__(config)
         cfg = config
 
-        self.embed = LowRankEmbedding(cfg.vocab_size, cfg.hidden_size, n=cfg.embed_factor)
+        self.embed = LowRankEmbedding(
+            cfg.vocab_size, cfg.hidden_size, n=cfg.embed_factor, factorized_init=cfg.factorized_init
+        )
 
         # Precompute RoPE cache up to maximum runtime length (prefix included).
         max_len = cfg.max_position_embeddings + cfg.prefix_len
@@ -462,6 +530,7 @@ class RecursiveRefinerModel(RecursiveRefinerPreTrainedModel):
                 rope=rope,
                 pre_norm=cfg.pre_norm,
                 is_causal=cfg.is_causal,
+                use_sdpa=cfg.use_sdpa,
             )
             for _ in range(block_count)
         ])

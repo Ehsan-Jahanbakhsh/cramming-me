@@ -26,7 +26,7 @@ set -euo pipefail
 
 ACTION="${1:-print-pretrain}"
 
-PREFIX="${PREFIX:-trm_h256_ds}"
+PREFIX="${PREFIX:-trm_h256_ds_v2}"
 SEED="${SEED:-1975620753}"
 BUDGET="${BUDGET:-8}"
 DATA="${DATA:-pile-readymade}"

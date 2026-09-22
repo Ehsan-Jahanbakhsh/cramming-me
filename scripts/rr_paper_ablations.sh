@@ -12,9 +12,9 @@ set -euo pipefail
 #
 # Groups:
 #   core        - smallest defensible table around the successful tiny8x model
-#   baselines   - BERT/CrammedBERT/ALBERT and flat shared/untied RR controls
-#   components  - RR component ablations: embedding rank, cycles, depth, FFN, norm
-#   sizes       - RR width scaling sweep
+#   baselines   - additional effective-depth BERT/ALBERT controls after core
+#   components  - RR component variants after the core embedding anchors
+#   sizes       - RR width variants after the h256 core anchor
 #   all         - core + baselines + components + sizes
 #
 # Resume the same named runs with:
@@ -26,7 +26,7 @@ set -euo pipefail
 ACTION="${1:-print-pretrain}"
 GROUP="${2:-core}"
 
-PREFIX="${PREFIX:-rr_paper}"
+PREFIX="${PREFIX:-rr_paper_v2}"
 SEED="${SEED:-1975620753}"
 BUDGET="${BUDGET:-8}"
 TRAIN_MBS="${TRAIN_MBS:-256}"
@@ -315,7 +315,7 @@ albert_shared() {
 }
 
 group_core() {
-  # Core uses full-rank embeddings; embedding-factorization sweeps live in components.
+  # Rank-1 and rank-4 embedding anchors; remaining ranks live in components.
   rr tiny8x_h256_l2_c2x3_ef4 256 4 2 2 3 4 4.0
   rr tiny8x_h256_l2_c2x3_ef1 256 4 2 2 3 1 4.0
 
@@ -339,8 +339,6 @@ group_core() {
 }
 
 group_baselines() {
-  group_core
-
   # Match RR's effective Transformer-block applications: 2 layers * 2 hi * (3 lo + 1 hi) = 16.
   hfbert h256_l16_effective_depth 256 4 16 1024 impl.microbatch_size=128
   crammed h256_l16_effective_depth 256 4 16 1024 impl.microbatch_size=128
@@ -350,10 +348,8 @@ group_baselines() {
 }
 
 group_components() {
-  # Low-rank/tied embedding ablation.
-  rr h256_l2_c2x3_ef1 256 4 2 2 3 1 4.0
+  # The ef1 and ef4 anchors are in core; run core before this group.
   rr h256_l2_c2x3_ef2 256 4 2 2 3 2 4.0
-  rr h256_l2_c2x3_ef4 256 4 2 2 3 4 4.0
   rr h256_l2_c2x3_ef8 256 4 2 2 3 8 4.0
 
   # Recurrence schedule at roughly fixed physical parameters.
@@ -376,7 +372,7 @@ group_components() {
 
 group_sizes() {
   rr h128_l2_c2x3_ef4 128 2 2 2 3 4 4.0
-  rr h256_l2_c2x3_ef4 256 4 2 2 3 4 4.0
+  # h256 is the core anchor.
   rr h512_l2_c2x3_ef4 512 8 2 2 3 4 4.0 impl.microbatch_size=128
   rr h768_l2_c2x3_ef4 768 12 2 2 3 4 4.0 impl.microbatch_size=128
   rr h1024_l2_c2x3_ef4 1024 16 2 2 3 4 4.0 impl.microbatch_size=64
@@ -388,6 +384,7 @@ case "$GROUP" in
   components) group_components ;;
   sizes) group_sizes ;;
   all)
+    group_core
     group_baselines
     group_components
     group_sizes

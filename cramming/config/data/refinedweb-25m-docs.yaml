@@ -1,0 +1,36 @@
+# Falcon RefinedWeb smoke corpus.
+#
+# RefinedWeb is the web backbone used by NeoBERT, but the full HF dataset is
+# enormous. This config takes the first 25M streamed documents for a practical
+# Cramming-style preprocessing smoke before building a larger readymade corpus.
+
+name: refinedweb-25m-docs
+defaults:
+  - sources:
+      - falcon_refinedweb
+
+normalizer:
+  force_lowercase: true
+  strip_accents: true
+  force_english_keyboard: true
+  whitespace_escape: false
+
+tokenizer: WordPiece
+vocab_size: 32768
+
+seq_length: 128
+include_cls_token_in_corpus: false
+include_sep_token_in_corpus: true
+use_type_ids: false
+
+max_entries_in_raw_dataset: 25e6
+max_seq_in_tokenized_dataset: 85e6
+
+named_entity_simplification: false
+remove_whitespaces: false
+remove_trash: true
+trash_cutoff: 0.25
+deduplicate_entries: false
+deduplication_threshold: 75
+
+ordering: sentence-length-curriculum

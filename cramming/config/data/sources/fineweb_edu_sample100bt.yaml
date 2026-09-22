@@ -1,0 +1,20 @@
+# FineWeb-Edu 100B-token sample from Hugging Face.
+# Education-filtered slice to compare against or mix after a backbone smoke.
+HuggingFaceFW/fineweb-edu:
+  provider: huggingface
+  name: sample-100BT
+  split: train
+  streaming: True
+
+  remove_columns:
+    - id
+    - dump
+    - url
+    - date
+    - file_path
+    - language
+    - language_score
+    - token_count
+    - score
+    - int_score
+  concatenate_successive_entries: 0

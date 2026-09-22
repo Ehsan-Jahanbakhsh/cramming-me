@@ -16,13 +16,14 @@ optim:
   weight_decay: 0.1
 
 name: GLUE
+score_name: GLUE8 # Eight-task validation composite; WNLI is omitted.
 evaluation_set: validation # always keep this at validation except for the final run
 
 # checkpoint name:
 # This can be either "latest", or a reference to a specific checkpoint in a subfolder
 checkpoint: latest
 path: ${impl.path} # Path for caches of datasets and tokenizers
-max_seq_length: 1024
+max_seq_length: 512 # Matches the BERT/ALBERT baseline position limit.
 
 # Default options:
 # These can be overwritten by specific tasks

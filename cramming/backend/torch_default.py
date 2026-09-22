@@ -280,6 +280,14 @@ class TorchEngineMinimal(torch.nn.Module):
 
         # Microbatch accumulation settings and counters
         self.effective_mbs = self.cfg_impl.microbatch_size * self.num_machines  # across machines
+        if self.effective_mbs <= 0 or self.cfg_train.batch_size <= 0:
+            raise ValueError("train.batch_size and impl.microbatch_size must be positive.")
+        if self.cfg_train.batch_size % self.effective_mbs != 0:
+            raise ValueError(
+                "train.batch_size must be divisible by impl.microbatch_size * world_size "
+                f"(batch={self.cfg_train.batch_size}, microbatch={self.cfg_impl.microbatch_size}, "
+                f"world_size={self.num_machines})."
+            )
         self.current_batch_size = self.cfg_train.batch_size if self.cfg_train.batch_size_ramp == 0 else self.effective_mbs
         self.accumulation_steps_expected = self.current_batch_size // self.effective_mbs
         self.accumulated_samples = 0  # Record the number of samples seen, reset after triggering gradient update

@@ -185,36 +185,39 @@ class PatchedDataCollatorForLanguageModeling(transformers.DataCollatorForLanguag
     def torch_mask_tokens(self, inputs=None, special_tokens_mask=None):
         """
         Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original.
-        The ratios in this version are always fixed so that the number of masks is never dynamic!
-
-        Also special_tokens_masks are disregarded in this flavor
-
-        According to timeit this is not slower than the old approach (with was fast enough)
+        Select a fixed fraction of eligible tokens in each sequence. Special and
+        padding positions are never prediction targets.
         """
         labels = inputs.clone()
 
-        number_of_masks = round(self.mlm_probability * inputs.shape[1])
-        mask_locations = torch.argsort(torch.randint_like(inputs, inputs.shape[1]))[:, :number_of_masks]
-        # this was slightly fudged to be faster. A draw of torch.rand would be more random, but take slightly longer to sort
+        if special_tokens_mask is None:
+            special_tokens_mask = torch.zeros_like(inputs, dtype=torch.bool)
+        else:
+            special_tokens_mask = special_tokens_mask.to(device=inputs.device, dtype=torch.bool)
+        for token_id in self.tokenizer.all_special_ids:
+            special_tokens_mask |= inputs.eq(token_id)
+        if self.tokenizer.pad_token_id is not None:
+            special_tokens_mask |= inputs.eq(self.tokenizer.pad_token_id)
 
-        masked_indices = torch.zeros_like(inputs, dtype=torch.bool)
-        masked_indices.scatter_(1, mask_locations, 1)
+        eligible_count = (~special_tokens_mask).sum(dim=1)
+        number_of_masks = (eligible_count * self.mlm_probability).round().long()
+        number_of_masks = torch.minimum(number_of_masks.clamp_min(1), eligible_count)
+        random_scores = torch.rand(inputs.shape, device=inputs.device)
+        random_scores.masked_fill_(special_tokens_mask, 2.0)
+        ranks = random_scores.argsort(dim=1).argsort(dim=1)
+        masked_indices = ranks < number_of_masks.unsqueeze(1)
         labels[~masked_indices] = -100  # We only compute loss on masked tokens
 
         if self.use_80_20_rule:
             # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
-            first_80percent_mask_locations = mask_locations[:, : round(0.8 * number_of_masks)]
-
-            indices_replaced = torch.zeros_like(inputs, dtype=torch.bool)
-            indices_replaced.scatter_(1, first_80percent_mask_locations, 1)
+            first_80percent = (number_of_masks * 0.8).round().long().unsqueeze(1)
+            indices_replaced = ranks < first_80percent
             inputs[indices_replaced] = self.mask_token
 
             # 10% of the time, we replace masked input tokens with random word
-            next_10percent_mask_locations = mask_locations[:, round(0.8 * number_of_masks) : round(0.9 * number_of_masks)]
-
-            indices_random = torch.zeros_like(inputs, dtype=torch.bool)
-            indices_random.scatter_(1, next_10percent_mask_locations, 1)
-            random_words = torch.randint(len(self.tokenizer), labels.shape, dtype=inputs.dtype)
+            first_90percent = (number_of_masks * 0.9).round().long().unsqueeze(1)
+            indices_random = (ranks >= first_80percent) & (ranks < first_90percent)
+            random_words = torch.randint(len(self.tokenizer), labels.shape, dtype=inputs.dtype, device=inputs.device)
             inputs[indices_random] = random_words[indices_random]
 
             # The rest of the time (10% of the time) we keep the masked input tokens unchanged

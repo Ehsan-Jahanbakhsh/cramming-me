@@ -1,0 +1,36 @@
+# FineWeb-Edu sample for modern encoder recipe experiments.
+#
+# This is not a drop-in replacement for `pile-readymade` final runs: it requires
+# tokenization/preprocessing time. Use it to build a new readymade corpus if the
+# final RR run is allowed to spend time on better data.
+
+name: fineweb-edu-sample10bt
+defaults:
+  - sources:
+      - fineweb_edu_sample10bt
+
+normalizer:
+  force_lowercase: true
+  strip_accents: true
+  force_english_keyboard: true
+  whitespace_escape: false
+
+tokenizer: WordPiece
+vocab_size: 32768
+
+seq_length: 128
+include_cls_token_in_corpus: false
+include_sep_token_in_corpus: true
+use_type_ids: false
+
+max_entries_in_raw_dataset: 25e6
+max_seq_in_tokenized_dataset: 85e6
+
+named_entity_simplification: false
+remove_whitespaces: false
+remove_trash: true
+trash_cutoff: 0.25
+deduplicate_entries: false
+deduplication_threshold: 75
+
+ordering: sentence-length-curriculum

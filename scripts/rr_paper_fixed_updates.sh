@@ -11,8 +11,9 @@ set -euo pipefail
 #   bash scripts/rr_paper_fixed_updates.sh pretrain components
 #   bash scripts/rr_paper_fixed_updates.sh eval core
 #
-# Repeating the same command resumes matching runs from intermediate_state.pth.
-# Use the same prefix, global batch, microbatch size, and GPU count when resuming.
+# Runs restart from the beginning by default. The trainer does not restore its
+# data cursor or RNG state, so resumed runs are unsuitable for controlled paper
+# comparisons. Set RESUME_RUN_AFTER_PREEMPT=True only for exploratory recovery.
 # Different microbatch/GPU settings get a distinct prefix by default.
 #
 # Examples:
@@ -29,12 +30,12 @@ TRAIN_MBS="${TRAIN_MBS:-256}"
 TRAIN_BATCH="${TRAIN_BATCH:-2048}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 SEED="${SEED:-1975620753}"
-PREFIX="${PREFIX:-rr_fixed_${FIXED_UPDATES}_b${TRAIN_BATCH}_mbs${TRAIN_MBS}_g${NPROC_PER_NODE}_s${SEED}}"
+PREFIX="${PREFIX:-rr_fixed_v2_${FIXED_UPDATES}_b${TRAIN_BATCH}_mbs${TRAIN_MBS}_g${NPROC_PER_NODE}_s${SEED}}"
 
 export FIXED_UPDATES TRAIN_MBS TRAIN_BATCH NPROC_PER_NODE SEED PREFIX
 export BUDGET=0
 export AUTO_MICROBATCH=False
-export RESUME_RUN_AFTER_PREEMPT=True
+export RESUME_RUN_AFTER_PREEMPT="${RESUME_RUN_AFTER_PREEMPT:-False}"
 export SAVE_EVERY_NTH_STEP="${SAVE_EVERY_NTH_STEP:-100000}"
 
 exec bash scripts/rr_paper_ablations.sh "$ACTION" "$GROUP"

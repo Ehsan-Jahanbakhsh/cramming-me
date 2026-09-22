@@ -16,6 +16,7 @@ optim:
   muon_lr: 0.002
 
 name: GLUE
+score_name: GLUE8 # Eight-task validation composite; WNLI is omitted.
 evaluation_set: validation # always keep this at validation except for the final run
 
 # checkpoint name:

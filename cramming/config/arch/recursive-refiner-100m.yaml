@@ -1,0 +1,45 @@
+# Recursive Refiner 100M-class encoder.
+#
+# Approx params with vocab=32768 and embed_factor=4: 96.9M.
+# Runtime block applications with hi_cycles=2, lo_cycles=3:
+#   2 * (3 + 1) * 3 = 24 shared block calls.
+
+architectures:
+  - RecursiveRefinerForMaskedLM
+
+hidden_size: 1024
+num_attention_heads: 16
+num_hidden_layers: 3
+
+# Local tiny RR evidence favored wider FFNs; keep this for the 100M final candidate.
+expansion: 8.0
+
+hi_cycles: 2
+lo_cycles: 3
+grad_last_cycle_only: false
+
+halt_on_train: false
+halt_on_eval: false
+halt_min_cycles: 1
+halt_threshold: 0.0
+halt_per_sample: true
+halt_batch_reduction: max
+halt_epsilon: 1e-6
+
+embed_factor: 4
+factorized_init: variance_matched # Use legacy only to reproduce checkpoints from before this fix.
+
+pre_norm: true
+rms_eps: 1e-5
+rope_theta: 10000.0
+
+prefix_len: 0
+is_causal: false
+
+pad_token_id: 0
+bos_token_id: 1
+eos_token_id: 2
+
+use_cache: false
+max_position_embeddings: 512
+use_sdpa: true

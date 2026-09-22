@@ -1,0 +1,35 @@
+# FineWeb 100B-token sample for a serious modern web-data backbone.
+#
+# This is intentionally larger than the quick sample config. Build it into a
+# readymade corpus before using it for the final RR run.
+
+name: fineweb-sample100bt
+defaults:
+  - sources:
+      - fineweb_sample100bt
+
+normalizer:
+  force_lowercase: true
+  strip_accents: true
+  force_english_keyboard: true
+  whitespace_escape: false
+
+tokenizer: WordPiece
+vocab_size: 32768
+
+seq_length: 128
+include_cls_token_in_corpus: false
+include_sep_token_in_corpus: true
+use_type_ids: false
+
+max_entries_in_raw_dataset: 150e6
+max_seq_in_tokenized_dataset: 1e14
+
+named_entity_simplification: false
+remove_whitespaces: false
+remove_trash: true
+trash_cutoff: 0.25
+deduplicate_entries: false
+deduplication_threshold: 75
+
+ordering: sentence-length-curriculum

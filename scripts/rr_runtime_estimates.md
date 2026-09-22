@@ -1,5 +1,9 @@
 # Runtime Estimates for Recursive Refiner Ablations
 
+Historical estimate only: the H200 ablation launcher and its plan were removed.
+Commands below that name `rr_paper_h200_ablations.sh` are archived examples and
+will not run. Use `rr_paper_ablations.sh` or `rr_paper_fixed_updates.sh` for new runs.
+
 ## Summary
 
 The short version:

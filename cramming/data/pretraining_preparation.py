@@ -131,6 +131,7 @@ def preprocess_dataset(cfg_data, download_path, num_threads=1, max_raw_chunk_siz
         # remove columns that break later processing steps
         if details.remove_columns is not None:
             raw_dataset = raw_dataset.remove_columns(details.remove_columns)
+        text_column_name = getattr(details, "text_column", "text")
         # Filter?
         if getattr(details, "filter", None) is not None:
 
@@ -145,8 +146,12 @@ def preprocess_dataset(cfg_data, download_path, num_threads=1, max_raw_chunk_siz
         # move streams to fixed datasets to make everything sane (and to allow concatenation with unstreamed data)
         if details.streaming:
             raw_dataset = raw_dataset.take(int(cfg_data.max_entries_in_raw_dataset))
-            raw_dataset = _move_stream_to_fixed_map(raw_dataset, cfg_data.max_entries_in_raw_dataset, max_raw_chunk_size)
+            raw_dataset = _move_stream_to_fixed_map(
+                raw_dataset, cfg_data.max_entries_in_raw_dataset, max_raw_chunk_size, text_column_name=text_column_name
+            )
         else:
+            if text_column_name != "text" and "text" not in raw_dataset.column_names:
+                raw_dataset = raw_dataset.rename_column(text_column_name, "text")
             if cfg_data.max_entries_in_raw_dataset < len(raw_dataset):
                 raw_dataset = raw_dataset.select(range(int(cfg_data.max_entries_in_raw_dataset)))
         # concatenate dataset that were cut into pieces that are too small
@@ -171,13 +176,13 @@ def preprocess_dataset(cfg_data, download_path, num_threads=1, max_raw_chunk_siz
     return tokenized_dataset, tokenizer
 
 
-def _move_stream_to_fixed_map(raw_data_streamed, max_entries_in_raw_dataset, max_raw_chunk_size=1e14):
+def _move_stream_to_fixed_map(raw_data_streamed, max_entries_in_raw_dataset, max_raw_chunk_size=1e14, text_column_name="text"):
     """Save streaming dataset to a fixed mapping-style database."""
     # I'm tired of IterableDatasets and will take the performance hit to write them out instead:
     try:
         if max_raw_chunk_size > max_entries_in_raw_dataset:
             with tempfile.TemporaryDirectory() as tmpdirname:
-                datasets.Dataset.from_dict(dict(text=[v["text"] for v in raw_data_streamed])).save_to_disk(tmpdirname + "raw_data")
+                datasets.Dataset.from_dict(dict(text=[v[text_column_name] for v in raw_data_streamed])).save_to_disk(tmpdirname + "raw_data")
                 raw_data_mapped = datasets.load_from_disk(tmpdirname + "raw_data")
             # This used to be only a move into RAM but this breaks memory later using C4:
             # raw_data = datasets.Dataset.from_dict(dict(text=[v["text"] for v in raw_data]))
@@ -187,7 +192,7 @@ def _move_stream_to_fixed_map(raw_data_streamed, max_entries_in_raw_dataset, max
                 mapped_sets = []
                 data_in_RAM = defaultdict(list)
                 for idx, value_stream in enumerate(raw_data_streamed):
-                    data_in_RAM["text"].append(value_stream["text"])
+                    data_in_RAM["text"].append(value_stream[text_column_name])
                     if ((idx + 1) % max_raw_chunk_size == 0) or ((idx - 1) == max_entries_in_raw_dataset):
                         datasets.Dataset.from_dict(data_in_RAM).save_to_disk(tmpdirname + "raw_data" + str(idx))
                         mapped_dataset = datasets.load_from_disk(tmpdirname + "raw_data" + str(idx))

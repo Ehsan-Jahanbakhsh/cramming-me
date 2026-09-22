@@ -74,6 +74,16 @@ def get_schedule_fn(initial_time, cfg_train):
             num_training_steps=cfg_train.steps,
             initial_time=initial_time,
         )
+    elif cfg_train.scheduler == "budget-wsd":
+        scheduler_fn = partial(
+            get_budget_wsd_scheduler,
+            hour_budget=cfg_train.budget,
+            num_warmup_steps=cfg_train.warmup_steps,
+            num_cooldown_steps=cfg_train.cooldown_steps,
+            num_training_steps=cfg_train.steps,
+            initial_time=initial_time,
+            lr_end_factor=getattr(cfg_train, "lr_end_factor", 0.1),
+        )
     elif cfg_train.scheduler == "budget-cosine-decay":
         scheduler_fn = partial(
             get_budget_cosine_schedule_with_warmup,
@@ -349,6 +359,43 @@ def get_budget_constant_scheduler(optimizer, hour_budget, num_warmup_steps, num_
             return max(0.0, float((num_training_steps - fake_step) / num_cooldown_steps))
         else:
             return 1.0
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch=-1)
+
+
+def get_budget_wsd_scheduler(
+    optimizer,
+    hour_budget,
+    num_warmup_steps,
+    num_cooldown_steps,
+    num_training_steps,
+    initial_time,
+    lr_end_factor=0.1,
+):
+    """Budgeted warmup-stable-decay schedule.
+
+    This is a wallclock-budget variant of the WSD/trapezoid family used by
+    modern encoder recipes: linearly warm up, hold the peak LR for most of
+    training, then smoothly decay to a non-zero floor.
+    """
+
+    lr_end_factor = float(lr_end_factor)
+    if lr_end_factor < 0.0 or lr_end_factor > 1.0:
+        raise ValueError(f"lr_end_factor must be in [0, 1], got {lr_end_factor}.")
+
+    def lr_lambda(current_step: int):
+        fake_step = _get_fake_step(current_step, initial_time, hour_budget, num_training_steps)
+
+        if num_warmup_steps > 0 and fake_step < num_warmup_steps:
+            return float(fake_step) / float(max(1, num_warmup_steps))
+
+        decay_start = max(num_warmup_steps, num_training_steps - max(0, num_cooldown_steps))
+        if num_cooldown_steps <= 0 or fake_step <= decay_start:
+            return 1.0
+
+        progress = min(1.0, max(0.0, float(fake_step - decay_start) / float(max(1, num_training_steps - decay_start))))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return lr_end_factor + (1.0 - lr_end_factor) * cosine
 
     return LambdaLR(optimizer, lr_lambda, last_epoch=-1)
 

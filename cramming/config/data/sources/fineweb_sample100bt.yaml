@@ -1,0 +1,19 @@
+# FineWeb 100B-token sample from Hugging Face.
+# This is the preferred first serious modern web backbone if preprocessing
+# time/storage are available.
+HuggingFaceFW/fineweb:
+  provider: huggingface
+  name: sample-100BT
+  split: train
+  streaming: True
+
+  remove_columns:
+    - id
+    - dump
+    - url
+    - date
+    - file_path
+    - language
+    - language_score
+    - token_count
+  concatenate_successive_entries: 0

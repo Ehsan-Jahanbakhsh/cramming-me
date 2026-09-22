@@ -72,6 +72,9 @@ def main_downstream_process(cfg, setup):
                     break
 
             metrics[task_name] = validate(model_engine, task["validloader"], metric, setup, cfg)
+            if task["extra_validloader"] is not None:
+                extra_eval_metric = validate(model_engine, task["extra_validloader"], metric, setup, cfg)
+                metrics[task_name].update({f"{k}_extra": v for k, v in extra_eval_metric.items()})
             selection_score = _selection_score(metrics[task_name], task, cfg) if epoch_selection == "best" else float("nan")
             stats[f"{task_name}_epoch"] += [epoch]
             stats[f"{task_name}_loss"] += [loss.item()]
@@ -116,28 +119,18 @@ def main_downstream_process(cfg, setup):
                 stats[f"{task_name}_selected_{name}"] += [metric_val]
             log.info(f"Selected epoch {best_epoch} for task {task_name} with validation score {best_score:2.4f}.")
             cramming.utils.wandb_log({k: v for k, v in stats.items() if k.startswith(f"{task_name}_selected_")}, cfg)
-        # Launch extra testing if extra validation set exists (as with MNLI-mismatched):
-        if task["extra_validloader"] is not None:
-            extra_eval_metric = validate(model_engine, task["extra_validloader"], metric, setup, cfg)
-            # metrics[task_name + "extra"] = extra_eval_metric
-            metrics[task_name].update({f"{k}_extra": v for k, v in extra_eval_metric.items()})
-            for name, metric_val in extra_eval_metric.items():
-                stats[f"{task_name}_{name}_extra"] += [metric_val]
-            msg_metrics = " ".join([f"{k}: {v:2.4f}" for k, v in extra_eval_metric.items()])
-            log.info(f"Extra validation metric is {msg_metrics} after finetuning.")
-            cramming.utils.wandb_log({f"{task_name}_{k}_extra": [v] for k, v in extra_eval_metric.items()}, cfg)
-
     # Check average metric over all tasks:
-    target_metrics = []
+    task_scores = []
     for task_name, task in tasks.items():
         target_metric_names = task["details"]["target_metrics"]
-        for metric_name in target_metric_names:
-            target_metrics.append(metrics[task_name][metric_name])
-    metrics[f"{cfg.eval.name}_amean"] = torch.as_tensor(target_metrics).mean().item()
-    metrics[f"{cfg.eval.name}_hmean"] = torch.as_tensor(target_metrics).pow(-1).mean().pow(-1).item()
-    log.info(f"Overall average metric on evaluation {cfg.eval.name} is {metrics[f'{cfg.eval.name}_amean']:.2f}.")
+        values = [metrics[task_name][metric_name] for metric_name in target_metric_names]
+        task_scores.append(torch.as_tensor(values).mean().item())
+    score_name = cfg.eval.get("score_name", cfg.eval.name)
+    metrics[f"{score_name}_amean"] = torch.as_tensor(task_scores).mean().item()
+    metrics[f"{score_name}_hmean"] = torch.as_tensor(task_scores).pow(-1).mean().pow(-1).item()
+    log.info(f"Overall average metric on evaluation {score_name} is {metrics[f'{score_name}_amean']:.2f}.")
     cramming.utils.wandb_log(
-        {f"{cfg.eval.name}_amean": [metrics[f"{cfg.eval.name}_amean"]], f"{cfg.eval.name}_hmean": [metrics[f"{cfg.eval.name}_hmean"]]},
+        {f"{score_name}_amean": [metrics[f"{score_name}_amean"]], f"{score_name}_hmean": [metrics[f"{score_name}_hmean"]]},
         cfg,
     )
 

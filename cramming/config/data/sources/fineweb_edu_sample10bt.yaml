@@ -1,0 +1,21 @@
+# FineWeb-Edu 10B-token sample from Hugging Face.
+# Full dataset is huge; use this subset for recipe experiments before building a
+# dedicated readymade tokenized corpus.
+HuggingFaceFW/fineweb-edu:
+  provider: huggingface
+  name: sample-10BT
+  split: train
+  streaming: True
+
+  remove_columns:
+    - id
+    - dump
+    - url
+    - date
+    - file_path
+    - language
+    - language_score
+    - token_count
+    - score
+    - int_score
+  concatenate_successive_entries: 0

@@ -2,6 +2,11 @@
 
 ## Current Anchor
 
+Historical runs below used the old factorized-embedding initialization and a
+different GLUE aggregate. Keep them as pilot evidence; retrain anchors under the
+current code before comparing them with new ablations. New evaluation writes
+`GLUE8_amean`, the mean of eight per-task validation scores.
+
 The strongest small run provided by the user is:
 
 - Run: `rr_me_train_final_tiny8x`
@@ -28,30 +33,46 @@ Nearby existing results:
 
 ## Run Order
 
+For a first matched-token campaign, set `FIXED_UPDATES=40000` for each
+`rr_paper_fixed_updates.sh` command below (about 81.9 million sequences at
+global batch 2048). The wrapper's default is one million updates, which is a
+much larger campaign.
+
 1. Smoke test:
    `bash scripts/rr_paper_ablations.sh dryrun-pretrain core`
 
-2. Core table:
-   `bash scripts/rr_paper_ablations.sh pretrain core`
-   `bash scripts/rr_paper_ablations.sh eval core`
+2. Controlled core table with equal optimizer updates and tokens:
+   `bash scripts/rr_paper_fixed_updates.sh pretrain core`
+   `bash scripts/rr_paper_fixed_updates.sh eval core`
 
-3. Baselines:
-   `bash scripts/rr_paper_ablations.sh pretrain baselines`
-   `bash scripts/rr_paper_ablations.sh eval baselines`
+3. Additional baselines:
+   `bash scripts/rr_paper_fixed_updates.sh pretrain baselines`
+   `bash scripts/rr_paper_fixed_updates.sh eval baselines`
 
 4. Component ablations:
-   `bash scripts/rr_paper_ablations.sh pretrain components`
-   `bash scripts/rr_paper_ablations.sh eval components`
+   `bash scripts/rr_paper_fixed_updates.sh pretrain components`
+   `bash scripts/rr_paper_fixed_updates.sh eval components`
 
 5. Scaling:
-   `bash scripts/rr_paper_ablations.sh pretrain sizes`
-   `bash scripts/rr_paper_ablations.sh eval sizes`
+   `bash scripts/rr_paper_fixed_updates.sh pretrain sizes`
+   `bash scripts/rr_paper_fixed_updates.sh eval sizes`
 
-For paper numbers, rerun the final shortlist with at least three seeds by setting `SEED=...` and preferably a name prefix such as `PREFIX=rr_paper_s2`.
+The fixed-update wrapper uses the same batch settings and seed in its default
+prefix for pretrain and eval. Keep these settings unchanged across matching
+commands. Restart preempted paper runs from the beginning because resume does
+not restore the data cursor or RNG state. For paper numbers,
+rerun the final shortlist with at least three pretraining seeds and multiple
+fine-tuning seeds per checkpoint. Add a held-out MLM set, and report its loss
+at matched token counts alongside downstream scores. Run the wallclock-budget
+script separately for hardware efficiency comparisons.
 
 ## Fairness Notes
 
-The script defaults to the successful small-run recipe: `pile-readymade`, `train=rr-me-onecycle`, `budget=8`, `batch_size=2048`, `microbatch_size=256`, MLM probability 0.15, and full GLUE evaluation for 4 epochs at `8e-5`.
+The budget script defaults to the successful small-run recipe: `pile-readymade`,
+`train=rr-me-onecycle`, `budget=8`, `batch_size=2048`, MLM probability 0.15,
+and eight-task GLUE validation for 4 epochs at `8e-5`. Automatic microbatch
+sizing may change the configured microbatch; the fixed-update wrapper disables
+it and validates batch divisibility.
 
 The baseline groups include:
 

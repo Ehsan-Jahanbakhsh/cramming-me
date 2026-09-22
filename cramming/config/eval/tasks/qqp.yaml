@@ -4,4 +4,4 @@ qqp:
   regression: False
   structure: [question1, question2]
 
-  target_metrics: ["f1"]
+  target_metrics: [accuracy, f1]

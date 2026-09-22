@@ -1,0 +1,16 @@
+# Falcon RefinedWeb from Hugging Face.
+# The raw text field is named `content`, so this source depends on the
+# source-level `text_column` support in pretraining_preparation.py.
+tiiuae/falcon-refinedweb:
+  provider: huggingface
+  split: train
+  streaming: True
+  text_column: content
+
+  remove_columns:
+    - url
+    - timestamp
+    - dump
+    - segment
+    - image_urls
+  concatenate_successive_entries: 0

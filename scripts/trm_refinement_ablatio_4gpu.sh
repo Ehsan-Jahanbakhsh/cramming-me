@@ -10,11 +10,11 @@ set -euo pipefail
 # On Windows, if plain bash opens WSL, call your Git/MinGW bash executable directly.
 
 RUN="${RUN:-}"
-PREFIX="${PREFIX:-rr_single_high_cmp_b8_4gpu}"
+PREFIX="${PREFIX:-rr_single_high_cmp_v2_b8_4gpu}"
 SEED="${SEED:-1975620753}"
 BUDGET="${BUDGET:-8}"
 DATA="${DATA:-pile-readymade}"
-DATA_STREAMING="${DATA_STREAMING:-False}"
+DATA_STREAMING="${DATA_STREAMING:-True}"
 TRAIN_CFG="${TRAIN_CFG:-rr-me-onecycle}"
 RR_ARCH_CFG="${RR_ARCH_CFG:-recursive-refiner-tiny}"
 TRM_ARCH_CFG="${TRM_ARCH_CFG:-trm}"

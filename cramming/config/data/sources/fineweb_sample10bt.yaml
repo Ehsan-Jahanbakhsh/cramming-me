@@ -1,0 +1,19 @@
+# FineWeb 10B-token sample from Hugging Face.
+# Use as the smallest modern web-data backbone smoke before building a larger
+# readymade corpus.
+HuggingFaceFW/fineweb:
+  provider: huggingface
+  name: sample-10BT
+  split: train
+  streaming: True
+
+  remove_columns:
+    - id
+    - dump
+    - url
+    - date
+    - file_path
+    - language
+    - language_score
+    - token_count
+  concatenate_successive_entries: 0

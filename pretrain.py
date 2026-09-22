@@ -148,7 +148,7 @@ def main_training_process(cfg, setup):
                 model_engine, step, training_allowed, no_recovery_necessary, cfg
             )
 
-        communicate_flags(training_allowed, no_recovery_necessary)
+        training_allowed, no_recovery_necessary = communicate_flags(training_allowed, no_recovery_necessary)
 
         if (cfg.dryrun and step > 2) or not training_allowed:
             break

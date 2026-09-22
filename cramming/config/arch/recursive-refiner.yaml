@@ -37,6 +37,7 @@ halt_epsilon: 1e-6
 
 # Factorized embedding rank: rank = hidden_size / embed_factor.
 embed_factor: 1
+factorized_init: variance_matched # Use legacy only to reproduce checkpoints from before this fix.
 
 # Normalization/positional encoding.
 pre_norm: true
